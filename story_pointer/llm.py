@@ -284,8 +284,17 @@ class ProviderError(RuntimeError):
     """Raised when a provider returns a non-2xx or unparseable response."""
 
 
+class RateLimitError(ProviderError):
+    """Provider HTTP 429 with an optional server-suggested retry delay."""
+
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 __all__ = [
     "ProviderError",
+    "RateLimitError",
     "build_request",
     "dict_to_result",
     "extract_content",

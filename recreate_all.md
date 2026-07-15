@@ -148,6 +148,8 @@ Use `pydantic-settings`. `Settings` reads `.env` as UTF-8, ignores extra keys, a
 | `GLM_MODEL` | `glm-4-flash` | Zhipu model |
 | `LLM_TEMPERATURE` | `0.2` | Generation temperature |
 | `LLM_MAX_TOKENS` | `2400` | Generation limit |
+| `LLM_RATE_LIMIT_WAIT_SECONDS` | `15.0` | Minimum asynchronous hold after HTTP 429; constrained to 0–3600 |
+| `LLM_RATE_LIMIT_MAX_RETRIES` | `3` | Bounded 429 retries; constrained to 0–10; zero disables retry |
 | `GROQ_API_KEY` | empty | Secret |
 | `GROQ_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible root |
 | `OPENAI_API_KEY` | empty | Secret |
@@ -184,7 +186,7 @@ Use `pydantic-settings`. `Settings` reads `.env` as UTF-8, ignores extra keys, a
 - `jira_instance(name)` returns the first exact name match or `None`.
 - `cors_origin_list()` returns `["*"]` for `*`; otherwise trimmed non-empty comma-separated values.
 - `validate_provider_ready()` raises `RuntimeError` naming `LLM_PROVIDER` when the selected provider key is absent.
-- `.env.example` MUST contain all variables, blank secret placeholders, comments for provider selection, Slim, Jira JSON, server, and Phoenix startup/privacy.
+- `.env.example` MUST contain all variables, blank secret placeholders, comments for provider selection, rate-limit hold/retries, Slim, Jira JSON, server, and Phoenix startup/privacy.
 
 ## 5. Canonical data model (`schema.py`)
 
@@ -352,7 +354,7 @@ Unknown providers raise `ValueError`.
 
 ### 7.2 Response extraction
 
-- Any HTTP status `>=400` raises `ProviderError` containing provider, status, and at most the first 400 serialized body characters.
+- HTTP 429 is converted by the engine to `RateLimitError`, a `ProviderError` subclass carrying optional `retry_after`. Other HTTP status `>=400` raises `ProviderError` containing provider, status, and at most the first 400 serialized body characters.
 - OpenAI-compatible content path: `choices[0].message.content`.
 - Claude content path: `content[0].text`.
 - Unexpected shapes raise provider-specific `ProviderError`.
@@ -479,7 +481,7 @@ Signature: `async estimate(story, spec=None, progress=True) -> StoryPointResult`
 2. Validate provider key.
 3. Log five conceptual steps: start, build_prompt, estimate, normalize, gate.
 4. Start OpenInference `CHAIN` span `story_pointer.estimate` with execution mode, provider/model, and privacy-safe story metadata.
-5. Await `_call_provider`.
+5. Await `_call_provider_with_retry`. It uses the configured bounded 429 policy and asynchronous sleeps; persistent exhaustion re-raises the final `RateLimitError`.
 6. In child `CHAIN` span `story_pointer.normalize`, parse into result.
 7. In child `CHAIN` span `story_pointer.invariant_gate`, apply invariant.
 8. Add result `ok` and non-null points to parent, mark OK, return.
@@ -493,13 +495,13 @@ Signature: `async estimate(story, spec=None, progress=True) -> StoryPointResult`
 4. Yield status `{node:"start", message:"Pipeline started.", trace_id}`.
 5. Yield status for `build_prompt`: `Injecting 12-factor rubric + 6 anchors.`
 6. Yield status for `estimate`: `Calling {provider}/{model}.`
-7. Await `_call_provider`.
-8. Break raw model text into 120-character Python string slices. For each, yield `chunk` with `{text}` and `await asyncio.sleep(0)`. Record chunk count.
+7. Call `_call_provider` in a loop of `max_retries + 1` attempts. On `RateLimitError`, re-raise when exhausted; otherwise compute the hold, add Phoenix event `story_pointer.rate_limit.wait`, emit status `{node:"rate_limit", message, retry_after_seconds, retry_number, trace_id}`, log a warning, and asynchronously sleep before retrying.
+8. The hold is `max(LLM_RATE_LIMIT_WAIT_SECONDS, provider retry_after)`. A successful attempt continues normally. Break raw model text into 120-character Python string slices. For each, yield `chunk` with `{text}` and `await asyncio.sleep(0)`. Record chunk count.
 9. Yield normalize status. Parse in `story_pointer.normalize` child span.
 10. Yield gate status. Apply gate in `story_pointer.invariant_gate` child span.
 11. Record result OK/points and mark workflow span OK.
 12. Yield exactly one atomic `result`: `{result: result.model_dump(mode="json"), trace_id}`.
-13. `ProviderError`: mark span error and yield `error` with `Provider error: ...` plus trace ID.
+13. `ProviderError`, including exhausted rate limiting: mark span error and yield `error` with `Provider error: ...` plus trace ID.
 14. Any other exception: mark error, log traceback, yield `error` with `Estimation failed: ...` plus trace ID.
 
 `stream()` converts errors to events rather than re-raising them after provider validation has passed.
@@ -521,7 +523,14 @@ Required ordering is one full item at a time. Exactly one terminal item event (`
 
 ### 10.6 Provider HTTP call and telemetry
 
-`_call_provider(spec, story)`:
+Rate-limit helpers:
+
+- `_parse_retry_duration(value)` accepts numeric seconds, suffixed seconds, and optional minute+second forms such as `13.78`, `13.78s`, or `1m2s`; invalid/blank values return null.
+- `_rate_limit_hint(headers, payload)` reads `retry-after`, `x-ratelimit-reset-tokens`, and `x-ratelimit-reset-requests`, plus a nested JSON error message containing `try again in ...`; return the longest parsed hint.
+- `_rate_limit_delay(configured_wait, exc)` returns the greater of configured minimum and exception hint.
+- `_call_provider_with_retry(spec, story)` implements the same retry count/hold for the non-streaming estimate route, logging each asynchronous wait.
+
+`_call_provider(spec, story)` performs one HTTP attempt:
 
 1. Build URL, headers, body with `llm.build_request`.
 2. Start `LLM` span `story_pointer.llm.call` with model, provider, JSON invocation parameters (`temperature`, `max_tokens`), hostname only, and safe story metadata.
@@ -534,9 +543,10 @@ Required ordering is one full item at a time. Exactly one terminal item event (`
    - completion from `completion_tokens` or `output_tokens`;
    - total from `total_tokens`, otherwise sum prompt+completion when both integers;
    - write OpenInference `llm.token_count.*` attributes.
-8. Extract provider content, reject empty/whitespace content with `ProviderError`.
-9. If capture enabled, record text output and MIME type.
-10. Mark span OK and return content.
+8. For status 429, serialize at most 400 body characters, derive the provider hint, and raise `RateLimitError` without attempting response-content extraction.
+9. Extract provider content for other statuses, rejecting empty/whitespace content with `ProviderError`.
+10. If capture enabled, record text output and MIME type.
+11. Mark span OK and return content.
 
 The nested HTTPX instrumentation creates one generic provider HTTP child span. Authorization headers and keys MUST NOT be manually added to spans.
 
@@ -883,7 +893,8 @@ multipart POST /upload -> pandas reader by extension
 - Missing browser title: local message, no request.
 - Invalid request body: FastAPI 422; browser converts body detail/text to error.
 - Missing provider key: `stream()` raises on first iteration before its inner try; the endpoint generator catches it and emits a generic SSE `error` without a trace ID. The sync endpoint returns HTTP 500.
-- Provider HTTP/shape/empty response: SSE `error`, workflow span ERROR, no result.
+- Provider HTTP 429: parse provider wait hint, emit live SSE hold status, asynchronously wait and retry up to the configured maximum; after exhaustion emit the normal provider error. In batch mode, exhaustion fails only that row and later rows continue.
+- Other provider HTTP/shape/empty response: SSE `error`, workflow span ERROR, no result.
 - Invalid JSON: SSE `error`, no result.
 - Invalid estimate but parseable result: result event with `ok=false`, `points=null`; browser displays invariant warning.
 - User Clear/cancellation: abort fetch; no error displayed; UI reset.
@@ -944,7 +955,7 @@ Must cover valid result; every valid point; missing why; missing TL;DR; both mis
 
 ### 18.3 Provider/engine tests
 
-Must assert exact OpenAI/Groq/GLM/Claude URL/header/body shapes, provider extraction, HTTP errors, fenced/prose JSON parsing, happy SSE flow with mocked LLM, trace ID on first/final events, exactly one atomic result, provider error with no result, invariant violation with redacted points, `StreamEvent.to_sse()` framing, successful all-row batch output, and continuation after a per-item provider error.
+Must assert exact OpenAI/Groq/GLM/Claude URL/header/body shapes, provider extraction, HTTP errors, fenced/prose JSON parsing, happy SSE flow with mocked LLM, trace ID on first/final events, exactly one atomic result, provider error with no result, Groq `13.78s` retry-hint/header parsing, live asynchronous hold-and-retry SSE status, invariant violation with redacted points, `StreamEvent.to_sse()` framing, successful all-row batch output, and continuation after a per-item provider error.
 
 ### 18.4 Source tests
 
@@ -958,7 +969,7 @@ Must mock single and batch engine streams and assert named SSE status/result, tw
 
 Must assert story attributes contain metadata but no story text/credentials, OpenAI and Anthropic token mapping, derived totals, 32-character trace ID, and public Phoenix status without keys/headers.
 
-Expected current result: **64 tests pass** with no network or live Phoenix requirement.
+Expected current result: **67 tests pass** with no network, real hold, or live Phoenix requirement.
 
 ## 19. Module/file inventory
 
@@ -968,7 +979,7 @@ Expected current result: **64 tests pass** with no network or live Phoenix requi
 | `anchors.py` | factor/anchor constants; rubric, anchors, system prompt, user prompt builders |
 | `schema.py` | all input/result Pydantic models and helper methods |
 | `config.py` | literals, `ModelSpec`, `JiraInstance`, `Settings`, cache helpers |
-| `llm.py` | request builders, content extraction, JSON parser, result mapper, level/point coercion, `ProviderError` |
+| `llm.py` | request builders, content extraction, JSON parser, result mapper, level/point coercion, `ProviderError`, `RateLimitError` |
 | `engine.py` | event type, invariant, graph loaders, direct estimate/single+batch streams, provider call, usage mapping, Slim runner |
 | `telemetry.py` | Phoenix state/config, FastAPI/HTTPX instrumentation, tracer/status/story helpers |
 | `api.py` | app, request models, SSE helper, ten explicit routes, static mount |
@@ -989,8 +1000,8 @@ Recreate these names so imports, monkeypatches, tests, and browser event handler
 - `anchors.py`: `render_rubric_block`, `render_anchors_block`, `system_prompt`, `build_user_prompt`.
 - `schema.py`: `StoryInput`, `StoryBatch`, `FactorScore`, `DecidingDriver`, `AnchorCmp`, `PerLayerEffort`, `PersonDays`, `Risk`, `SplitSubStory`, `StoryPointResult`; StoryInput validator `_coerce_ac`; result methods `has_explanation`, `is_invariant_satisfied`, `redact_points`.
 - `config.py`: `ModelSpec`, `JiraInstance`, `Settings`; property `rest_root`; methods `_lower_provider`, `model_spec`, `jira_config`, `jira_instance`, `cors_origin_list`, `validate_provider_ready`; functions `get_settings`, `reset_settings_cache`.
-- `llm.py`: `build_request`, `_openai_request`, `_anthropic_request`, `extract_content`, `parse_json_payload`, `to_result`, `dict_to_result`, `_level`, `_points`, `ProviderError`.
-- `engine.py`: `StreamEvent`, `apply_invariant_gate`, `_load_graphon`, `GraphonUnavailable`, `_graphon_available`, `estimate`, `stream`, `stream_batch`, `_call_provider`, `_record_token_usage`, `run_graphon_slim`.
+- `llm.py`: `build_request`, `_openai_request`, `_anthropic_request`, `extract_content`, `parse_json_payload`, `to_result`, `dict_to_result`, `_level`, `_points`, `ProviderError`, `RateLimitError`.
+- `engine.py`: `StreamEvent`, `apply_invariant_gate`, `_load_graphon`, `GraphonUnavailable`, `_graphon_available`, `estimate`, `stream`, `stream_batch`, `_parse_retry_duration`, `_rate_limit_hint`, `_rate_limit_delay`, `_call_provider_with_retry`, `_call_provider`, `_record_token_usage`, `run_graphon_slim`.
 - `telemetry.py`: `TelemetryState`, `configure_telemetry`, `instrument_fastapi`, `telemetry_state`, `get_tracer`, `current_trace_id`, `set_error`, `set_ok`, `story_attributes`.
 - `sources/manual.py`: `parse_manual`.
 - `sources/jira.py`: `JiraError`, `auth_header`, `fetch_issue`, `_adf_to_text`, `map_issue_to_story`, `get_story`.
@@ -1036,11 +1047,12 @@ GET http://127.0.0.1:8000/health/telemetry -> configured when Phoenix enabled
 Phoenix UI -> http://127.0.0.1:6006
 POST /estimate -> text/event-stream with status/chunk/result or error
 POST /estimate/batch -> every submitted row reaches item_result/item_error, then batch_complete
+Provider HTTP 429 -> SSE rate_limit status, async configured/provider hold, bounded retry
 Certified result -> number + why + TL;DR + trace ID
 Spreadsheet UI -> all titles listed, live progress, expandable complete estimates
 Phoenix single trace -> exactly the meaningful spans described above
 Phoenix batch trace -> batch parent with one complete per-story subtree per row
-pytest -> 64 passed
+pytest -> 67 passed
 pip check -> no broken requirements
 ```
 
@@ -1050,7 +1062,7 @@ These SHA-256 values identify the audited implementation on which this specifica
 
 ```text
 bc089f817abc8f2b5a52b6a968f7f78ba768eaba6f5c911286b1ad15ac1bd846  .gitignore
-fe446bc546a4d6a613540019448f4937d7e0a4bec520231643706430a73d9edf  .env.example
+8d07c6fe4ce140996ad8b57a963941421c04d92bc5174a6d6d9f37b3d1c2bb72  .env.example
 d82a969242988fc781269b7f7f0aa33d1c17b928ef23aac561758486f512e54d  pyproject.toml
 0d7e6133b0513bd29a52ded0ba3bc65819ea171efb871b30b48d705607e8e3e3  requirements.txt
 28850ebb8f4bcde2204c0301b9016308aa334bef5b51f8e8626058611f53d98b  run.py
@@ -1060,9 +1072,9 @@ b6ee98a0fef41fb85200f512127700e483c970f159c38bba215c9ac2657fb871  dsl/graph_slim
 f6e08fc9b8c605f15ccc7034d40c344dd90d4d6bf4cddde4b42bd3174991d75a  story_pointer/__init__.py
 17dde15103317e5e4e11de5d81bdc522e7bf6ea1f863b0cb331451099780f049  story_pointer/anchors.py
 c8f19ab97ad9e407c5fe8b3f5254abc43ab6d92f6fd922299343f9faeebb9cca  story_pointer/api.py
-38758e39b5853fc76e7f2bf9b3e6264dd3998857a9bd48e43c2731ea7f959515  story_pointer/config.py
-b794ec804a61cc7509f3082581727bf901c65a4c7603a44e1cf8fd92ac435524  story_pointer/engine.py
-44d67c7990ed7c2817aaa4975b9bb683b15d4c22d59c36e648f94521e356ad63  story_pointer/llm.py
+8a023c9e1d5547c5d931c83b368289c096f8de56c470df73e21cb21fe5512a58  story_pointer/config.py
+1520cb67e734ce466fc71321bba7a06262c882d05538e39819a313b54e376c20  story_pointer/engine.py
+c054cac756b2f323fab95e2d128df960819807bbf1d380ff64bd60a6e64b0a90  story_pointer/llm.py
 7e1128aff931f72b10970892e20826357dcd23940f6d933811eeb19f76450b4c  story_pointer/schema.py
 c9c02ce1c16382bb6862371934d64f02222a7125d422c4494fb1c956f8d1a332  story_pointer/sources/__init__.py
 9f08ebd93338bcf3ded3cfdad5becf431087aa321d887bd17ed08adfab4b57b4  story_pointer/sources/jira.py
@@ -1072,7 +1084,7 @@ c9c02ce1c16382bb6862371934d64f02222a7125d422c4494fb1c956f8d1a332  story_pointer/
 7e9af23c4d8769e855436c950c52874ef9d5ac0c36f24531913b3ca965d6860f  tests/__init__.py
 4da1428431f3966f14fface2490d3227a79112a04f1ba83d28609b27e0cd49d8  tests/conftest.py
 de0bcc24360e958e6564f5b0806a30ff6ae3b38426493b1b5f1d10d69ebb27cd  tests/test_api_sse.py
-f523b27e35690bc01e06d02083c7f70843fa2c71c212fca0b619f75cb849af50  tests/test_engine.py
+f1c7a4d6fe3f3d199012057289c0fe863df5aa4ee243ddc18a1dc03dc850676d  tests/test_engine.py
 bb0e5137768298277d62d8470fbd9055f03a86ef017ff475e31bd60530ba6d89  tests/test_invariant.py
 f34aa667f65ce40912136ceecc423fdd24582e241de4243feeb0b740d308a4d8  tests/test_schema.py
 83b48b30e9eab72fc4354f2359292aca966eff543aa25198f0e5b02fd823dae1  tests/test_sources.py
@@ -1096,11 +1108,12 @@ f34aa667f65ce40912136ceecc423fdd24582e241de4243feeb0b740d308a4d8  tests/test_sch
 - [ ] Backend and frontend invariants both exist.
 - [ ] Abort-safe single/batch POST SSE parser handles LF/CRLF and premature close.
 - [ ] Spreadsheet upload estimates every row and renders expandable full detail.
+- [ ] HTTP 429 honors provider/configured waits, emits SSE status, and retries asynchronously.
 - [ ] Phoenix spans, token usage, trace ID, privacy default, and UI link exist.
 - [ ] FastAPI SSE send/receive spans are suppressed.
 - [ ] Local Phoenix ownership/start/stop semantics exist.
 - [ ] Both seven-node DSL graphs exist with exact linear topology.
 - [ ] All 17 banking fixtures and both reference documents exist.
-- [ ] All 64 tests pass.
+- [ ] All 67 tests pass.
 
 If every checklist item and acceptance check passes, the complete current code and operational flow have been recreated.

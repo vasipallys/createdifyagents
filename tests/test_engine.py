@@ -7,8 +7,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from story_pointer.config import ModelSpec, reset_settings_cache
-from story_pointer.engine import StreamEvent, apply_invariant_gate, stream, stream_batch
-from story_pointer.llm import build_request, extract_content, parse_json_payload
+from story_pointer.engine import (
+    StreamEvent,
+    _call_provider,
+    _rate_limit_hint,
+    apply_invariant_gate,
+    stream,
+    stream_batch,
+)
+from story_pointer.llm import RateLimitError, build_request, extract_content, parse_json_payload
 from story_pointer.schema import StoryInput
 
 
@@ -207,6 +214,84 @@ async def test_stream_provider_error_emits_error_event(monkeypatch):
 
     assert any(e.type == "error" for e in events)
     assert not any(e.type == "result" for e in events)
+
+
+def test_rate_limit_hint_parses_groq_retry_message_and_headers():
+    payload = {
+        "error": {
+            "message": (
+                "Rate limit reached on tokens per minute. "
+                "Please try again in 13.78s."
+            )
+        }
+    }
+    assert _rate_limit_hint({}, payload) == 13.78
+    assert _rate_limit_hint({"retry-after": "20"}, payload) == 20.0
+
+
+@pytest.mark.asyncio
+async def test_provider_http_429_becomes_retryable_error(monkeypatch):
+    payload = {
+        "error": {
+            "message": "Rate limit reached. Please try again in 13.78s.",
+            "code": "rate_limit_exceeded",
+        }
+    }
+
+    class FakeResponse:
+        status_code = 429
+        headers = {"retry-after": "10"}
+        text = json.dumps(payload)
+
+        def json(self):
+            return payload
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr("story_pointer.engine.httpx.AsyncClient", FakeClient)
+    with pytest.raises(RateLimitError) as caught:
+        await _call_provider(_spec("groq"), StoryInput(title="Rate limited"))
+
+    assert caught.value.retry_after == 13.78
+    assert "groq returned HTTP 429" in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_stream_holds_and_retries_after_rate_limit(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_RATE_LIMIT_WAIT_SECONDS", "0")
+    monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "2")
+    reset_settings_cache()
+    calls = 0
+
+    async def limited_once(spec, story):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RateLimitError("HTTP 429", retry_after=0.01)
+        return GOOD_RESPONSE_JSON
+
+    monkeypatch.setattr("story_pointer.engine._call_provider", limited_once)
+    monkeypatch.setattr("story_pointer.engine.asyncio.sleep", AsyncMock())
+    events = [event async for event in stream(StoryInput(title="Retry me"))]
+
+    wait = next(e for e in events if e.type == "status" and e.data["node"] == "rate_limit")
+    assert wait.data["retry_after_seconds"] == 0.01
+    assert wait.data["retry_number"] == 1
+    assert calls == 2
+    assert any(e.type == "result" for e in events)
 
 
 @pytest.mark.asyncio

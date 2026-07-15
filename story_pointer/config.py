@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     # Generation
     llm_temperature: float = 0.2
     llm_max_tokens: int = 2400
+    # On HTTP 429, wait at least this long (or longer when the provider asks)
+    # before retrying. Sleeps are asynchronous, so other requests keep moving.
+    llm_rate_limit_wait_seconds: float = Field(default=15.0, ge=0.0, le=3600.0)
+    llm_rate_limit_max_retries: int = Field(default=3, ge=0, le=10)
 
     # --- Groq ---
     groq_api_key: str = ""

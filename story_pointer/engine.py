@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterator
@@ -34,7 +35,7 @@ import httpx
 
 from .anchors import FACTOR_IDS, VALID_POINTS
 from .config import ModelSpec, get_settings
-from .llm import ProviderError, build_request, extract_content, to_result
+from .llm import ProviderError, RateLimitError, build_request, extract_content, to_result
 from .schema import StoryInput, StoryPointResult
 from .telemetry import (
     CHAIN,
@@ -211,7 +212,7 @@ async def estimate(
     }
     with tracer.start_as_current_span("story_pointer.estimate", attributes=attributes) as span:
         try:
-            raw_text = await _call_provider(spec, story)
+            raw_text = await _call_provider_with_retry(spec, story)
             with tracer.start_as_current_span(
                 "story_pointer.normalize",
                 attributes={OPENINFERENCE_SPAN_KIND: CHAIN},
@@ -268,7 +269,45 @@ async def stream(story: StoryInput, *, spec: ModelSpec | None = None) -> AsyncIt
                 "status",
                 {"node": "estimate", "message": f"Calling {spec.provider}/{spec.model}."},
             )
-            raw_text = await _call_provider(spec, story)
+            raw_text = ""
+            for attempt in range(settings.llm_rate_limit_max_retries + 1):
+                try:
+                    raw_text = await _call_provider(spec, story)
+                    break
+                except RateLimitError as exc:
+                    if attempt >= settings.llm_rate_limit_max_retries:
+                        raise
+                    delay = _rate_limit_delay(settings.llm_rate_limit_wait_seconds, exc)
+                    retry_number = attempt + 1
+                    span.add_event(
+                        "story_pointer.rate_limit.wait",
+                        attributes={
+                            "story_pointer.rate_limit.delay_seconds": delay,
+                            "story_pointer.rate_limit.retry_number": retry_number,
+                        },
+                    )
+                    yield StreamEvent(
+                        "status",
+                        {
+                            "node": "rate_limit",
+                            "message": (
+                                f"{spec.provider} rate limit reached; holding for "
+                                f"{delay:.2f}s before retry "
+                                f"{retry_number}/{settings.llm_rate_limit_max_retries}."
+                            ),
+                            "retry_after_seconds": delay,
+                            "retry_number": retry_number,
+                            "trace_id": trace_id,
+                        },
+                    )
+                    log.warning(
+                        "%s rate limited; waiting %.2fs before retry %s/%s",
+                        spec.provider,
+                        delay,
+                        retry_number,
+                        settings.llm_rate_limit_max_retries,
+                    )
+                    await asyncio.sleep(delay)
 
             # Stream the raw text in ~120-char chunks so the UI feels alive.
             chunk_count = 0
@@ -409,6 +448,72 @@ async def stream_batch(
 # ===========================================================================
 # Provider HTTP call (shared by both execution modes' "estimate" stage)
 # ===========================================================================
+def _parse_retry_duration(value: Any) -> float | None:
+    """Parse provider retry durations such as ``13.78``, ``13.78s``, or ``1m2s``."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        pass
+    match = re.search(
+        r"(?:(?P<minutes>\d+(?:\.\d+)?)\s*m(?:in(?:ute)?s?)?\s*)?"
+        r"(?P<seconds>\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?",
+        text,
+    )
+    if not match:
+        return None
+    minutes = float(match.group("minutes") or 0.0)
+    seconds = float(match.group("seconds"))
+    return max(0.0, minutes * 60.0 + seconds)
+
+
+def _rate_limit_hint(headers: Any, payload: Any) -> float | None:
+    """Read Retry-After/Groq reset headers, then the JSON error message."""
+    hints: list[float] = []
+    for name in ("retry-after", "x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+        parsed = _parse_retry_duration(headers.get(name) if headers else None)
+        if parsed is not None:
+            hints.append(parsed)
+    message = ""
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message", ""))
+    match = re.search(r"try again in\s+([^.,;]+(?:\.\d+)?s)", message, re.IGNORECASE)
+    if match:
+        parsed = _parse_retry_duration(match.group(1))
+        if parsed is not None:
+            hints.append(parsed)
+    return max(hints) if hints else None
+
+
+def _rate_limit_delay(configured_wait: float, exc: RateLimitError) -> float:
+    return max(configured_wait, exc.retry_after or 0.0)
+
+
+async def _call_provider_with_retry(spec: ModelSpec, story: StoryInput) -> str:
+    """Provider call with async 429 holds for non-streaming callers."""
+    settings = get_settings()
+    for attempt in range(settings.llm_rate_limit_max_retries + 1):
+        try:
+            return await _call_provider(spec, story)
+        except RateLimitError as exc:
+            if attempt >= settings.llm_rate_limit_max_retries:
+                raise
+            delay = _rate_limit_delay(settings.llm_rate_limit_wait_seconds, exc)
+            log.warning(
+                "%s rate limited; waiting %.2fs before retry %s/%s",
+                spec.provider,
+                delay,
+                attempt + 1,
+                settings.llm_rate_limit_max_retries,
+            )
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
+
+
 async def _call_provider(spec: ModelSpec, story: StoryInput) -> str:
     """POST to the provider and return the model's text content."""
     url, headers, body = build_request(spec, story)
@@ -438,6 +543,12 @@ async def _call_provider(spec: ModelSpec, story: StoryInput) -> str:
             except ValueError:
                 payload = {"raw": resp.text}
             _record_token_usage(span, payload)
+            if resp.status_code == 429:
+                error_body = json.dumps(payload)[:400] if payload else "<no body>"
+                raise RateLimitError(
+                    f"{spec.provider} returned HTTP 429: {error_body}",
+                    retry_after=_rate_limit_hint(resp.headers, payload),
+                )
             content = extract_content(spec.provider, resp.status_code, payload)
             if not content.strip():
                 raise ProviderError(f"{spec.provider}: empty content in response")

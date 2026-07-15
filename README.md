@@ -184,6 +184,8 @@ LLM_PROVIDER=openai                 # groq | openai | claude | glm
 LLM_EXECUTION_MODE=http             # http (default) | slim
 LLM_TEMPERATURE=0.2
 LLM_MAX_TOKENS=2400
+LLM_RATE_LIMIT_WAIT_SECONDS=15      # minimum async hold after HTTP 429
+LLM_RATE_LIMIT_MAX_RETRIES=3        # 0 disables retry
 
 # Exactly one provider block needs a key (matching LLM_PROVIDER):
 GROQ_API_KEY=
@@ -209,6 +211,12 @@ PHOENIX_CAPTURE_CONTENT=false
 
 Model names default to sensible values per provider and can be overridden
 (`OPENAI_MODEL`, `GROQ_MODEL`, `CLAUDE_MODEL`, `GLM_MODEL`).
+
+On HTTP 429, the app prefers the longest delay from `Retry-After`, Groq rate
+reset headers, the provider's `Please try again in 13.78s` message, and
+`LLM_RATE_LIMIT_WAIT_SECONDS`. SSE clients receive a live `rate_limit` status
+before the asynchronous hold. Once retries are exhausted, that row becomes an
+`item_error`; later spreadsheet rows still run.
 
 ---
 
