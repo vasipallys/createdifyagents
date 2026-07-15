@@ -374,6 +374,8 @@ Unknown providers raise `ValueError`.
 - Force `must_split=true` when points is 13.
 - Attach the supplied provider, model, and title.
 
+Anchor and split point fields are still declared as required integers. If `_points()` returns null for one of those nested entries, Pydantic validation may raise; that exception becomes the normal sync/SSE pipeline error path. Likewise, non-integer person-day strings may raise during `int()` coercion.
+
 `to_result()` is `parse_json_payload()` followed by `dict_to_result()`.
 
 ## 8. Invariant gate (`engine.apply_invariant_gate`)
@@ -822,7 +824,7 @@ multipart POST /upload -> pandas reader by extension
 
 - Missing browser title: local message, no request.
 - Invalid request body: FastAPI 422; browser converts body detail/text to error.
-- Missing provider key: validation failure; sync endpoint returns 500.
+- Missing provider key: `stream()` raises on first iteration before its inner try; the endpoint generator catches it and emits a generic SSE `error` without a trace ID. The sync endpoint returns HTTP 500.
 - Provider HTTP/shape/empty response: SSE `error`, workflow span ERROR, no result.
 - Invalid JSON: SSE `error`, no result.
 - Invalid estimate but parseable result: result event with `ok=false`, `points=null`; browser displays invariant warning.
@@ -866,6 +868,10 @@ Contains the same 17 exemplary stories organized into Digital Banking, Payments,
 
 This is a standalone reference architecture, not imported by the Python runtime. Preserve its complete React + Spring Boot + Dify SSE design: Dify setup/API, Maven/backend DTOs, WebClient, proxy controller, React fetch/ReadableStream hook, UI/CSS, Docker/Nginx, security, retry/session/history patterns, troubleshooting, SSE event appendix, and performance/scaling. Do not confuse its Java/Spring paths with the actual FastAPI application.
 
+### 17.4 `README.md`
+
+The operator/developer guide documents the product invariant, process overview, all 12 factors, six anchors, architecture stack, HTTP versus Slim modes, quick start, complete environment configuration, four providers, three story sources, HTTP/SSE contracts, both DSLs, the double invariant, Phoenix trace hierarchy and privacy setting, tests, project layout, and regulated-environment considerations. Commands and defaults MUST agree with this reconstruction specification.
+
 ## 18. Test suite as executable acceptance specification
 
 `tests/conftest.py` sets `PHOENIX_ENABLED=false` before collection so unit tests never require or export to a collector.
@@ -907,7 +913,7 @@ Expected current result: **61 tests pass** with no network or live Phoenix requi
 | `llm.py` | request builders, content extraction, JSON parser, result mapper, level/point coercion, `ProviderError` |
 | `engine.py` | event type, invariant, graph loaders, direct estimate/stream, provider call, usage mapping, Slim runner |
 | `telemetry.py` | Phoenix state/config, FastAPI/HTTPX instrumentation, tracer/status/story helpers |
-| `api.py` | app, request models, SSE helper, eight explicit routes, static mount |
+| `api.py` | app, request models, SSE helper, ten explicit routes, static mount |
 | `sources/manual.py` | `parse_manual` |
 | `sources/jira.py` | error, auth, fetch, ADF flatten, map, high-level get |
 | `sources/spreadsheet.py` | aliases, token/score/map, readers, parser, AC splitter |
@@ -917,6 +923,23 @@ Expected current result: **61 tests pass** with no network or live Phoenix requi
 | tests | all acceptance areas above |
 
 `sources/__init__.py` and `tests/__init__.py` are lightweight package markers; the former has a sources docstring and the latter may be empty/comment-only.
+
+### 19.1 Exact callable/class symbol index
+
+Recreate these names so imports, monkeypatches, tests, and browser event handlers remain compatible:
+
+- `anchors.py`: `render_rubric_block`, `render_anchors_block`, `system_prompt`, `build_user_prompt`.
+- `schema.py`: `StoryInput`, `StoryBatch`, `FactorScore`, `DecidingDriver`, `AnchorCmp`, `PerLayerEffort`, `PersonDays`, `Risk`, `SplitSubStory`, `StoryPointResult`; StoryInput validator `_coerce_ac`; result methods `has_explanation`, `is_invariant_satisfied`, `redact_points`.
+- `config.py`: `ModelSpec`, `JiraInstance`, `Settings`; property `rest_root`; methods `_lower_provider`, `model_spec`, `jira_config`, `jira_instance`, `cors_origin_list`, `validate_provider_ready`; functions `get_settings`, `reset_settings_cache`.
+- `llm.py`: `build_request`, `_openai_request`, `_anthropic_request`, `extract_content`, `parse_json_payload`, `to_result`, `dict_to_result`, `_level`, `_points`, `ProviderError`.
+- `engine.py`: `StreamEvent`, `apply_invariant_gate`, `_load_graphon`, `GraphonUnavailable`, `_graphon_available`, `estimate`, `stream`, `_call_provider`, `_record_token_usage`, `run_graphon_slim`.
+- `telemetry.py`: `TelemetryState`, `configure_telemetry`, `instrument_fastapi`, `telemetry_state`, `get_tracer`, `current_trace_id`, `set_error`, `set_ok`, `story_attributes`.
+- `sources/manual.py`: `parse_manual`.
+- `sources/jira.py`: `JiraError`, `auth_header`, `fetch_issue`, `_adf_to_text`, `map_issue_to_story`, `get_story`.
+- `sources/spreadsheet.py`: `_tokens`, `_score`, `map_columns`, `read_dataframe`, `parse`, `_split_ac`.
+- `api.py`: `EstimateRequest`, `JiraFetchRequest`, `_sse`, `health`, `telemetry_health`, `get_config`, `estimate_endpoint`, `estimate_sync_endpoint`, `jira_instances`, `jira_fetch`, `upload`, `estimate_batch`, `index`.
+- `run.py`: `_url_available`, `_phoenix_executable`, `_start_phoenix`, `_stop_process`, `main`.
+- Browser JavaScript: `invariantSatisfied`, `$`, `switchSrc`, `loadConfig`, `currentStory`, `fetchJira`, `uploadSheet`, `runEstimate`, `parseSSE`, `responseError`, `handleSSE`, `renderStatus`, `renderResult`, `clearAll`, `escapeHtml`, `prettyId`; global mutable `estimateController`.
 
 ## 20. Recreation procedure
 
