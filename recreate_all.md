@@ -658,3 +658,305 @@ start -> build_prompt -> estimate -> normalize -> gate -> render -> answer
 
 The graph comments MUST explain requirements for graphon, `dify-plugin-daemon-slim`, plugin credentials, and `LLM_EXECUTION_MODE=slim`.
 
+## 15. Single-page frontend (`static/index.html`)
+
+The frontend is one UTF-8 HTML document with inline CSS and JavaScript. There is no Node build, module loader, framework, or external asset.
+
+### 15.1 Visual system
+
+CSS variables:
+
+```css
+--bg: #0f1419;
+--panel: #1a2230;
+--panel-2: #222d3f;
+--text: #e6edf3;
+--muted: #8b9bb4;
+--accent: #4a9eff;
+--green: #2ea043;
+--amber: #d29922;
+--red: #f85149;
+--border: #2d3b50;
+--mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+```
+
+- Dark full-page system-font UI.
+- Header uses panel background, bottom border, title/model badge left, Phoenix/evidence badges right.
+- Main container is a maximum 1400px two-column grid with 20px gap/padding; collapse to one column below 900px.
+- Panels have dark surface, border, 8px radius, 18px padding.
+- Inputs use secondary panel background and 6px radius; textarea is monospace and vertically resizable.
+- Buttons use blue accent; secondary buttons use panel color; disabled opacity is 0.4.
+- Status bar has a blue pulsing dot (1.4s).
+- Result hero uses 48px monospace points, person-days, right-aligned TL;DR.
+- Low/Medium/High use translucent green/amber/red badges.
+- Separate styles exist for split warning, invariant warning, two-column factor grid, lists, pills, split cards, raw details/pre, source tabs, and errors.
+
+### 15.2 Required DOM IDs and controls
+
+IDs MUST be:
+
+```text
+model-badge, phoenix-link,
+input-panel, result-panel, result-body, err, estimate-btn,
+src-manual, src-jira, src-sheet,
+m_title, m_desc, m_ac, m_ctx,
+jira_instances_empty, jira_fields, j_instance, j_issue, jira_preview,
+sheet_file, sheet_preview
+```
+
+Header title is `🎯 Story Pointer`; Phoenix link is initially hidden, opens a new tab with `rel=noopener`; evidence badge says `evidence-led estimation`.
+
+Source tabs use inline `switchSrc('manual'|'jira'|'sheet')`. Manual starts active. Manual fields are title, description, one-AC-per-line textarea, and optional context. Jira has empty-config message, instance select, issue key, fetch button, and preview. Spreadsheet accepts `.csv,.xls,.xlsx` and uploads on file change. Main buttons call estimate and clear. Initial result says to run an estimate.
+
+### 15.3 Client-side invariant
+
+`invariantSatisfied(r)` requires all of the following: `r` exists; `r.ok === true`; points is non-null and one of `[1,2,3,5,8,13]`; `plain_language_why` is a non-empty trimmed string; and `tldr` is a non-empty trimmed string.
+
+### 15.4 Initialization and source state
+
+- `$` aliases `document.getElementById`.
+- `loadConfig()` fetches `/config`, parses JSON, sets model badge to `provider · model` and appends `· ⚠ no key` when absent.
+- Save `r.observability` in `window.__observability`. When enabled with UI URL, reveal/configure Phoenix link and title with project name.
+- If Jira names exist, hide empty message, show fields, and create option tags.
+- Config errors only `console.warn`.
+- `switchSrc()` toggles `active` on tab buttons by `data-src` and panels by `src-{name}`.
+- `currentStory()` for manual splits AC lines and trims bullet markers; for Jira returns `window.__jira_story` or null; for spreadsheet returns only the first uploaded story or null.
+
+### 15.5 Jira and upload browser flows
+
+`fetchJira()` clears errors, reads instance/key, returns on empty key, POSTs JSON to `/jira/fetch`, parses JSON, shows `detail` errors, stores result globally, and renders an escaped title pill. Network errors render as text.
+
+`uploadSheet()` clears errors, reads first file, returns when none, sends multipart field named `file`, parses JSON, shows detail errors, stores `r.stories || []`, and renders count plus at most five escaped title pills.
+
+### 15.6 POST SSE transport
+
+Do not instantiate `EventSource`; it is GET-only. Maintain module-level `estimateController`.
+
+`runEstimate()` exact behavior:
+
+1. Clear error; require current story with title.
+2. Disable Estimate and show `Starting…` status.
+3. Abort any older controller; create/store a new `AbortController`; keep nullable reader.
+4. POST `/estimate` with JSON `{story}`, `Content-Type: application/json`, `Accept: text/event-stream`, and abort signal.
+5. For non-OK responses, read body with `responseError()` and throw its detail/message/text or status fallback.
+6. Require content type containing `text/event-stream` and non-null body.
+7. Read `ReadableStream` through `TextDecoder`, supporting LF and CRLF frames separated by a blank line. Preserve incomplete tail across chunks.
+8. `parseSSE(frame)` defaults event to `message`, reads `event:` and all `data:` lines, joins data lines with newline, JSON-parses, and returns null for empty/invalid data.
+9. For every parsed event call `handleSSE`. Mark `terminalEvent` for result. For error, mark terminal then throw its message.
+10. Flush decoder at EOF and tolerate a final non-blank frame without separator.
+11. If no terminal result/error appeared, throw `The estimate stream closed before returning a result.`
+12. Catch: silently return for `AbortError`; otherwise show message in both error area and escaped invariant-warning result.
+13. Finally release reader lock. Only if this controller is still current, clear it and re-enable button; this avoids an older request enabling the button during a newer request.
+
+`responseError(resp)` reads text, attempts JSON and prefers `detail`, then `message`, otherwise text.
+
+`handleSSE(evt)` stores `evt.data.trace_id` globally when present; status replaces result with status UI; result calls `renderResult`. Chunk events intentionally have no visible renderer.
+
+### 15.7 Result rendering order
+
+All untrusted text MUST pass through `escapeHtml`, which replaces `& < > " '`; `prettyId` replaces underscores with spaces and title-cases word initials.
+
+If invariant fails, show no number. Prefer backend `error`, otherwise `Backend did not certify this estimate.` or `Missing plain-language explanation.` Include escaped raw payload in `<details>`.
+
+If certified, render in this order:
+
+1. Points hero, optional person-days range, TL;DR.
+2. Red `must_split` banner when true.
+3. Product-owner explanation.
+4. Factor grid when factors exist; show count `/12`, pretty ID, evidence, level badge.
+5. Deciding-driver list.
+6. Closest-anchor pills.
+7. Per-layer effort grid.
+8. Hidden-work list.
+9. Top-risk list with severity and mitigation.
+10. Assumptions list.
+11. Spike warning when needed.
+12. Recommended split cards with points, title, why.
+13. Observability section when trace ID exists; show trace ID and optional Phoenix link.
+14. Raw JSON details.
+
+`clearAll()` aborts active estimate; clears manual/Jira fields, Jira/sheet globals, trace ID, previews, errors, and restores initial result. It does not clear the native file input value. Call `loadConfig()` once at the bottom of the script.
+
+## 16. End-to-end flows
+
+### 16.1 Manual estimate
+
+```text
+Browser manual fields
+  -> currentStory / StoryInput JSON
+  -> POST /estimate
+  -> FastAPI validation + request span
+  -> engine stream CHAIN span
+  -> prompt builder (rubric + anchors + story)
+  -> provider-specific HTTP request
+  -> HTTPX span nested under LLM span
+  -> provider text extraction
+  -> 120-character SSE chunks
+  -> tolerant JSON parsing
+  -> canonical Pydantic result
+  -> invariant gate
+  -> atomic result + trace_id
+  -> browser invariant
+  -> result card + Phoenix correlation
+```
+
+### 16.2 Jira estimate
+
+```text
+GET /config -> Jira name select
+POST /jira/fetch -> resolve instance -> authenticated Jira GET
+-> ADF/custom AC mapping -> StoryInput stored in window
+-> same estimate flow as manual
+```
+
+### 16.3 Spreadsheet estimate
+
+```text
+multipart POST /upload -> pandas reader by extension
+-> fuzzy header mapping -> row-wise StoryInput[]
+-> browser displays up to five titles but estimates only stories[0]
+-> same estimate flow
+```
+
+### 16.4 Error paths
+
+- Missing browser title: local message, no request.
+- Invalid request body: FastAPI 422; browser converts body detail/text to error.
+- Missing provider key: validation failure; sync endpoint returns 500.
+- Provider HTTP/shape/empty response: SSE `error`, workflow span ERROR, no result.
+- Invalid JSON: SSE `error`, no result.
+- Invalid estimate but parseable result: result event with `ok=false`, `points=null`; browser displays invariant warning.
+- User Clear/cancellation: abort fetch; no error displayed; UI reset.
+- Premature SSE EOF: explicit browser error.
+- Phoenix unavailable: observability failure does not intentionally break the business flow.
+
+## 17. Reference data and architecture artifacts
+
+### 17.1 `banking_jira_stories.csv`
+
+CSV columns are exactly `Title`, `User Story`, `Acceptance Criteria`, `Technical Breakdown`, `Existing Points`. It contains these 17 multiline banking stories and baseline points:
+
+| ID/title | Points |
+|---|---:|
+| DB-001 Biometric Login | 5 |
+| DB-002 Real-Time Balance Widget | 3 |
+| DB-003 Scheduled Transfer Recurrence | 8 |
+| PY-001 Instant P2P Payment via Mobile Number | 13 |
+| PY-002 Cross-Border SWIFT Transfer Tracking | 8 |
+| LN-001 Pre-Approved Loan Offer Display | 5 |
+| LN-002 Digital Mortgage Application | 21 |
+| FR-001 Real-Time Transaction Fraud Alert | 8 |
+| FR-002 Behavioral Biometric Authentication | 13 |
+| RG-001 Automated CTR Filing | 8 |
+| RG-002 GDPR DSAR Portal | 13 |
+| CB-001 Multi-Level Approval Workflow for Wire Transfers | 13 |
+| CB-002 Cash Position Dashboard | 8 |
+| KYC-001 Digital Identity Verification with Liveness Detection | 13 |
+| KYC-002 Beneficial Ownership Collection | 8 |
+| WM-001 Goal-Based Investment Portfolio | 13 |
+| WM-002 Tax-Loss Harvesting Automation | 8 |
+
+Preserve multiline Gherkin ACs and technical-breakdown text. The intentionally off-scale `21` is reference data and MUST remain; provider normalization would not accept it as a valid final estimate.
+
+### 17.2 `banking_jira_stories_role_model.md`
+
+Contains the same 17 exemplary stories organized into Digital Banking, Payments, Lending, Fraud/Risk, Compliance, Corporate Banking, KYC, and Wealth Management. Each story includes priority/points/sprint, persona narrative, business value, Gherkin criteria, and where applicable definition of done, labels, and dependencies. It ends with story-writing best practices and a banking-persona quick reference.
+
+### 17.3 `dify-sse-complete-architecture.md`
+
+This is a standalone reference architecture, not imported by the Python runtime. Preserve its complete React + Spring Boot + Dify SSE design: Dify setup/API, Maven/backend DTOs, WebClient, proxy controller, React fetch/ReadableStream hook, UI/CSS, Docker/Nginx, security, retry/session/history patterns, troubleshooting, SSE event appendix, and performance/scaling. Do not confuse its Java/Spring paths with the actual FastAPI application.
+
+## 18. Test suite as executable acceptance specification
+
+`tests/conftest.py` sets `PHOENIX_ENABLED=false` before collection so unit tests never require or export to a collector.
+
+### 18.1 Schema/prompt tests
+
+Must prove exactly 12 unique factor IDs; valid points tuple; six anchors; 12 factors and 36 level bullets; prompt invariant/schema/story content; string/list AC coercion; immutable point redaction; and result helper success/failure.
+
+### 18.2 Invariant tests
+
+Must cover valid result; every valid point; missing why; missing TL;DR; both missing; invalid/null points; 13 without split; inadequate split; valid 13 split; split item over 8; reversed person-days; dict normalization handoff; off-scale point snapping; and level coercion.
+
+### 18.3 Provider/engine tests
+
+Must assert exact OpenAI/Groq/GLM/Claude URL/header/body shapes, provider extraction, HTTP errors, fenced/prose JSON parsing, happy SSE flow with mocked LLM, trace ID on first/final events, exactly one atomic result, provider error with no result, invariant violation with redacted points, and `StreamEvent.to_sse()` framing.
+
+### 18.4 Source tests
+
+Must assert exact and fuzzy spreadsheet mapping, missing title failure, CSV parse, in-memory XLSX round trip, Jira PAT-with-email Basic auth, Server Basic auth, ADF issue mapping, custom AC field mapping, and v2/v3 REST roots.
+
+### 18.5 API/frontend tests
+
+Must mock engine stream and assert named SSE status/result, content type, cache-control, no proxy buffering, result JSON, no `new EventSource`, guarded fetch/AbortController/status/content-type/try-catch-finally/premature-close logic, and safe observability configuration without API key.
+
+### 18.6 Telemetry tests
+
+Must assert story attributes contain metadata but no story text/credentials, OpenAI and Anthropic token mapping, derived totals, 32-character trace ID, and public Phoenix status without keys/headers.
+
+Expected current result: **61 tests pass** with no network or live Phoenix requirement.
+
+## 19. Module/file inventory
+
+| File | Required public/internal surface |
+|---|---|
+| `story_pointer/__init__.py` | `__version__="0.1.0"` |
+| `anchors.py` | factor/anchor constants; rubric, anchors, system prompt, user prompt builders |
+| `schema.py` | all input/result Pydantic models and helper methods |
+| `config.py` | literals, `ModelSpec`, `JiraInstance`, `Settings`, cache helpers |
+| `llm.py` | request builders, content extraction, JSON parser, result mapper, level/point coercion, `ProviderError` |
+| `engine.py` | event type, invariant, graph loaders, direct estimate/stream, provider call, usage mapping, Slim runner |
+| `telemetry.py` | Phoenix state/config, FastAPI/HTTPX instrumentation, tracer/status/story helpers |
+| `api.py` | app, request models, SSE helper, eight explicit routes, static mount |
+| `sources/manual.py` | `parse_manual` |
+| `sources/jira.py` | error, auth, fetch, ADF flatten, map, high-level get |
+| `sources/spreadsheet.py` | aliases, token/score/map, readers, parser, AC splitter |
+| `run.py` | URL readiness, CLI discovery, Phoenix start/stop, CLI main |
+| `static/index.html` | complete CSS, form/tabs, source fetches, POST SSE, result rendering, trace link |
+| both DSL files | seven nodes and six linear edges each |
+| tests | all acceptance areas above |
+
+`sources/__init__.py` and `tests/__init__.py` are lightweight package markers; the former has a sources docstring and the latter may be empty/comment-only.
+
+## 20. Recreation procedure
+
+1. Create the tree in section 2.
+2. Write packaging/dependencies exactly as section 3.
+3. Implement configuration and `.env.example` before importing the API.
+4. Implement Pydantic contracts.
+5. Add full rubric, anchors, and prompt schema.
+6. Implement provider adapters and normalization.
+7. Implement source adapters.
+8. Implement Phoenix telemetry with privacy-safe defaults.
+9. Implement engine direct HTTP and SSE flows, preserving current mode behavior.
+10. Implement FastAPI routes and static mount.
+11. Implement the single HTML file and client invariant.
+12. Implement both DSL graphs as independent artifacts.
+13. Add startup/Phoenix ownership logic.
+14. Restore the 17-story CSV, role-model markdown, and standalone SSE architecture reference.
+15. Recreate all tests and run validation.
+
+Commands:
+
+```powershell
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install -e ".[dev]"
+Copy-Item .env.example .env
+# Set one provider key in .env
+.\venv\Scripts\python.exe -m pytest -q
+.\venv\Scripts\python.exe run.py --with-phoenix
+```
+
+Acceptance checks:
+
+```text
+GET http://127.0.0.1:8000/health -> 200 {status:ok}
+GET http://127.0.0.1:8000/health/telemetry -> configured when Phoenix enabled
+Phoenix UI -> http://127.0.0.1:6006
+POST /estimate -> text/event-stream with status/chunk/result or error
+Certified result -> number + why + TL;DR + trace ID
+Phoenix trace -> exactly the six meaningful spans described above
+pytest -> 61 passed
+pip check -> no broken requirements
+```
+
