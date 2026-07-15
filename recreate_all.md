@@ -960,3 +960,62 @@ pytest -> 61 passed
 pip check -> no broken requirements
 ```
 
+## 21. Source snapshot hash manifest
+
+These SHA-256 values identify the audited implementation on which this specification is based. They are a completeness check for an exact source snapshot; behaviorally compatible recreations may differ in comments or formatting.
+
+```text
+bc089f817abc8f2b5a52b6a968f7f78ba768eaba6f5c911286b1ad15ac1bd846  .gitignore
+fe446bc546a4d6a613540019448f4937d7e0a4bec520231643706430a73d9edf  .env.example
+d82a969242988fc781269b7f7f0aa33d1c17b928ef23aac561758486f512e54d  pyproject.toml
+0d7e6133b0513bd29a52ded0ba3bc65819ea171efb871b30b48d705607e8e3e3  requirements.txt
+28850ebb8f4bcde2204c0301b9016308aa334bef5b51f8e8626058611f53d98b  run.py
+7b6327113a92ff98c3eca9402f5770bf8ae8a3e15e3e41172f69e901dd40dc9d  dsl/graph_http.yml
+b6ee98a0fef41fb85200f512127700e483c970f159c38bba215c9ac2657fb871  dsl/graph_slim.yml
+6ab8e855195c16c3284bc2bbcf09187a28d3d112c70e37a962490e368d193d00  static/index.html
+f6e08fc9b8c605f15ccc7034d40c344dd90d4d6bf4cddde4b42bd3174991d75a  story_pointer/__init__.py
+17dde15103317e5e4e11de5d81bdc522e7bf6ea1f863b0cb331451099780f049  story_pointer/anchors.py
+ff02e3621543ea114662d853ce8586f9d065eedf6b87a0d626954c3b1fa22a10  story_pointer/api.py
+38758e39b5853fc76e7f2bf9b3e6264dd3998857a9bd48e43c2731ea7f959515  story_pointer/config.py
+2eec95af2622173ab3fd38deb0d15004955ecf490c52a0f4b95e562b57928bbb  story_pointer/engine.py
+44d67c7990ed7c2817aaa4975b9bb683b15d4c22d59c36e648f94521e356ad63  story_pointer/llm.py
+7e1128aff931f72b10970892e20826357dcd23940f6d933811eeb19f76450b4c  story_pointer/schema.py
+c9c02ce1c16382bb6862371934d64f02222a7125d422c4494fb1c956f8d1a332  story_pointer/sources/__init__.py
+9f08ebd93338bcf3ded3cfdad5becf431087aa321d887bd17ed08adfab4b57b4  story_pointer/sources/jira.py
+161d25dce2375594543c29f92a265324f81f61d0ba6fd957dd28d45c267f3d35  story_pointer/sources/manual.py
+49d783e0094ec7179878e5d1dfe611395585807749dcfe43eee661fc586e5435  story_pointer/sources/spreadsheet.py
+583b7f5c1cc37263552fdb3b2da94e6b72c9b304926f198088d81cb06c65cdcf  story_pointer/telemetry.py
+7e9af23c4d8769e855436c950c52874ef9d5ac0c36f24531913b3ca965d6860f  tests/__init__.py
+4da1428431f3966f14fface2490d3227a79112a04f1ba83d28609b27e0cd49d8  tests/conftest.py
+6c45817dc8e1aa52bb2dec8ab2dd1b65570c2ea70806189f6c1f98e1b9fbdb81  tests/test_api_sse.py
+a7da6c703e7639f5afe5e05de368a4266e6745d91c3308c4d90175c891641776  tests/test_engine.py
+bb0e5137768298277d62d8470fbd9055f03a86ef017ff475e31bd60530ba6d89  tests/test_invariant.py
+f34aa667f65ce40912136ceecc423fdd24582e241de4243feeb0b740d308a4d8  tests/test_schema.py
+83b48b30e9eab72fc4354f2359292aca966eff543aa25198f0e5b02fd823dae1  tests/test_sources.py
+342d83b002b977392fe5557c6234e40ac9615832aef08da019d8183fd7b73992  tests/test_telemetry.py
+93706751608ed3e6c5f30196f6e7f03f33cef59933f617e63f657c46f9ca1a8a  banking_jira_stories.csv
+5956b30d137dc5c70e8ecc63ed21ddf25ec132ec8436120c4b7a73ac52b48a4b  banking_jira_stories_role_model.md
+7a996fe00b57085fdc48162cc735497690e2f6833dddc9d764d373f6355c0fad  dify-sse-complete-architecture.md
+```
+
+## 22. Final no-omission checklist
+
+- [ ] All 31 audited artifacts from the hash manifest are represented.
+- [ ] No secret `.env` or Phoenix database is included.
+- [ ] Every model field/default and coercion exists.
+- [ ] All 12 factor IDs and level meanings exist.
+- [ ] All six anchors exist.
+- [ ] All provider wire formats and response paths exist.
+- [ ] Manual, Jira, CSV, XLS, XLSX flows exist.
+- [ ] Direct Python runtime versus dormant Slim dispatch is preserved.
+- [ ] Sync, SSE, placeholder batch, and every error path exist.
+- [ ] Backend and frontend invariants both exist.
+- [ ] Abort-safe POST SSE parser handles LF/CRLF and premature close.
+- [ ] Phoenix spans, token usage, trace ID, privacy default, and UI link exist.
+- [ ] FastAPI SSE send/receive spans are suppressed.
+- [ ] Local Phoenix ownership/start/stop semantics exist.
+- [ ] Both seven-node DSL graphs exist with exact linear topology.
+- [ ] All 17 banking fixtures and both reference documents exist.
+- [ ] All 61 tests pass.
+
+If every checklist item and acceptance check passes, the complete current code and operational flow have been recreated.
