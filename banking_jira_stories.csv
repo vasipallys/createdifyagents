@@ -1,0 +1,471 @@
+Title,User Story,Acceptance Criteria,Technical Breakdown,Existing Points
+DB-001: Biometric Login,"As a retail banking customer, I want to log in to the mobile app using Face ID or fingerprint, so that I can access my accounts quickly without typing passwords.","Given I am on the mobile app login screen
+When I tap ""Use Face ID"" (iOS) or ""Use fingerprint"" (Android)
+And my biometric is successfully verified
+Then I am authenticated and redirected to my account dashboard
+
+Given I have enabled biometric login
+When I open the app after 5 minutes of inactivity
+Then I am prompted for biometric re-authentication
+
+Given biometric authentication fails 3 consecutive times
+When the 3rd attempt fails
+Then I am redirected to username/password login
+And a security alert is logged
+
+Given I am on a device without biometric hardware
+When I view the login screen
+Then the biometric option is not displayed","Mobile: Native iOS (LocalAuthentication framework) and Android (BiometricPrompt API) integration
+Backend: JWT token refresh with biometric assertion binding; session management with inactivity timeout
+Security: Hardware-backed keystore (Secure Enclave / TEE); anti-spoofing validation; audit logging
+API: /auth/biometric endpoint with device fingerprinting; fallback to OAuth2 password grant
+Infra: Rate limiting on biometric endpoints; SIEM integration for failed attempt alerts",5
+DB-002: Real-Time Balance Widget,"As a checking account holder, I want to see my real-time balance on my phone's home screen via a widget, so that I can monitor my spending without opening the app.","Given I have added the bank widget to my home screen
+When I view the widget
+Then I see my primary checking account balance
+And the timestamp of the last update
+
+Given my balance changes due to a transaction
+When the core banking system publishes the update
+Then the widget refreshes within 30 seconds
+
+Given I tap the widget
+When the tap is registered
+Then the mobile app opens to the account details screen
+
+Given I have multiple checking accounts
+When I configure the widget
+Then I can select which account to display","Mobile: iOS WidgetKit and Android AppWidgetProvider implementation; background refresh scheduling
+Backend: Push notification service (APNs/FCM) for balance update triggers; REST API for widget data fetch
+Security: Widget data encrypted at rest; no sensitive data in widget previews when locked
+Data: Account selection persistence in UserDefaults/SharedPreferences; caching strategy with TTL
+Integration: Core banking event stream (Kafka) → notification service → device push",3
+DB-003: Scheduled Transfer Recurrence,"As a customer with recurring bills, I want to set up recurring transfers (weekly, bi-weekly, monthly), so that I can automate my rent and utility payments without manual intervention.","Given I am setting up a new transfer
+When I select ""Recurring"" as the transfer type
+Then I can choose: Weekly, Bi-weekly, Monthly, or Custom
+
+Given I select ""Monthly"" recurrence
+When I configure the transfer
+Then I can select the day of the month (1-28 or ""last business day"")
+And set an end date or number of occurrences
+
+Given a recurring transfer is due on a weekend or holiday
+When the scheduled date arrives
+Then the transfer executes on the next business day
+And I receive a notification of the date adjustment
+
+Given a recurring transfer fails due to insufficient funds
+When the transfer attempt occurs
+Then the transfer is skipped
+And I receive an email + push notification
+And the recurrence continues for the next scheduled date
+
+Given I want to cancel a recurring transfer
+When I navigate to ""Scheduled Transfers"" and select ""Cancel""
+Then all future occurrences are cancelled
+And already-processed transfers remain unchanged
+And I receive a confirmation notification","Backend: Quartz/Celery job scheduler for recurring transfer execution; cron expression parser
+Database: Recurrence pattern storage (RRULE format); occurrence instance tracking; idempotency keys
+Core Banking: Integration with ACH/wire transfer APIs; NSF handling with retry logic
+Calendar Service: Business day calculator with holiday calendar integration (Federal Reserve)
+Notifications: Event-driven notification triggers for failures, skips, and cancellations
+Audit: Immutable job execution logs with transfer ID tracing",8
+PY-001: Instant P2P Payment via Mobile Number,"As a personal banking customer, I want to send money to anyone using just their mobile number, so that I can split bills and repay friends without knowing their bank details.","Given I am on the ""Send Money"" screen
+When I enter a mobile number
+And the recipient is registered with the bank
+Then I see their name and can proceed with the transfer
+
+Given I enter a mobile number not registered with the bank
+When I confirm the transfer
+Then the recipient receives an SMS with a secure link
+And they can claim the funds by registering or providing account details
+And unclaimed funds are auto-returned after 7 days
+
+Given I initiate a P2P transfer
+When I confirm the amount and recipient
+Then the funds are debited from my account immediately
+And the recipient receives the funds within 30 seconds
+And both parties receive transaction confirmations
+
+Given I send money to the wrong mobile number
+When I report the issue within 10 minutes
+And the funds have not been claimed
+Then I can cancel the transfer
+And the funds are returned to my account","Mobile: Contact picker integration; phone number normalization (libphonenumber); recipient lookup API
+Backend: Real-time payment rail integration (RTP/SEPA Instant/Faster Payments); escrow holding for unclaimed funds
+Database: Transaction ledger with dual-phase commit (debit/credit); claim token generation with expiry
+Security: PCI-DSS Level 1 compliance; end-to-end encryption; velocity limits; fraud scoring pre-transaction
+Notifications: SMS gateway (Twilio/SNS); push notifications; email confirmations
+Reconciliation: Nightly settlement reconciliation; exception handling for failed claims",13
+PY-002: Cross-Border SWIFT Transfer Tracking,"As a corporate treasury manager, I want to track my international SWIFT transfers in real-time with status updates, so that I can reconcile payments and inform vendors of expected receipt dates.","Given I have initiated a SWIFT transfer
+When I view the transfer details
+Then I see a status tracker: Initiated → Sent → Acknowledged → Settled
+And each status shows the timestamp and correspondent bank
+
+Given the transfer status changes
+When the SWIFT gpi API pushes an update
+Then I receive a push notification and email
+And the status tracker updates automatically
+
+Given I am viewing a completed transfer
+When I click ""Download Confirmation""
+Then I receive a PDF MT103 confirmation with UETR reference
+And the document is digitally signed by the bank
+
+Given I have 50+ pending international transfers
+When I view the ""International Payments"" dashboard
+Then I can filter by status, currency, date range, and beneficiary
+And export the filtered list to Excel","Backend: SWIFT gpi API integration (SWIFT Alliance Cloud); webhook listeners for status updates
+Database: UETR tracking table with status history; correspondent bank routing data
+Frontend: Corporate portal dashboard with AG Grid; real-time WebSocket updates
+Document: PDF generation (iText/Apache PDFBox) with digital signature (PAdES); MT103 parsing
+Search: Elasticsearch for transfer filtering and aggregation; export to CSV/XLSX
+Integration: Treasury workstation API (ISO 20022); ERP connector for auto-reconciliation",8
+LN-001: Pre-Approved Loan Offer Display,"As a credit card holder with good standing, I want to see personalized pre-approved loan offers in my dashboard, so that I can access credit quickly when I need it without a hard inquiry.","Given I am eligible for a pre-approved loan
+When I log in to online banking
+Then I see a personalized offer card on my dashboard
+With: loan amount, interest rate, monthly payment, and CTA
+
+Given I tap ""View Details"" on a loan offer
+When the details screen loads
+Then I see: APR, term options (12/24/36/48 months), total cost of credit
+And a representative example for my credit tier
+
+Given I accept a pre-approved loan offer
+When I confirm and e-sign the agreement
+Then the funds are deposited to my chosen account within 2 hours
+And no hard credit check is performed
+And the offer is removed from my dashboard
+
+Given I am not eligible for pre-approved offers
+When I view my dashboard
+Then no loan offer card is displayed
+And I am not aware that an eligibility check occurred","Backend: Pre-approval engine (batch nightly scoring using existing credit data); offer eligibility rules engine
+Mobile/Web: Personalized dashboard widget; dynamic offer rendering; e-signature integration (DocuSign/Adobe Sign)
+Database: Offer table with customer segmentation; acceptance tracking; Reg Z disclosure versioning
+Core Banking: Loan origination system API; account funding integration; interest rate pricing engine
+Compliance: Soft inquiry only (no hard pull); TILA/Reg Z disclosure rendering; opt-out preference check
+Analytics: Offer impression/click/accept funnel tracking; A/B testing framework for offer creative",5
+LN-002: Digital Mortgage Application,"As a first-time home buyer, I want to complete my mortgage application entirely online with document upload, so that I don't have to visit a branch or mail physical documents.","Given I start a new mortgage application
+When I complete Step 1 (Personal Info)
+Then I can save and resume later
+And my progress is preserved for 30 days
+
+Given I am on the ""Income & Employment"" step
+When I upload my W-2 and pay stubs
+Then the system extracts data using OCR
+And pre-fills the income fields
+And flags any discrepancies for review
+
+Given I have completed all required steps
+When I submit the application
+Then I receive an instant conditional pre-qualification
+Or a notification that manual underwriting is required
+And I can track my application status in real-time
+
+Given my application is under review
+When the loan officer updates the status
+Then I receive a push notification
+And the status tracker updates: Submitted → In Review → Approved → Closing","Frontend: Multi-step wizard with state management (Redux/Vuex); progress persistence in localStorage + backend
+Document: OCR pipeline (AWS Textract/Google Document AI); document classification; data extraction and validation
+Backend: Loan origination system (LOS) API; decision engine integration (Fannie Mae DU/Freddie Mac LPA)
+Database: Application schema with versioning; document metadata; status workflow state machine
+Workflow: BPMN engine for underwriting workflow; task assignment to loan officers; SLA tracking
+Security: Document encryption at rest (AES-256); PII masking; secure file upload (virus scan)
+Integration: Credit bureau soft pull (Equifax/Experian/TransUnion); appraisal ordering API; title search API",21
+FR-001: Real-Time Transaction Fraud Alert,"As a debit card holder, I want to receive an instant push notification for suspicious transactions, so that I can approve or decline them immediately and prevent fraud.","Given a transaction triggers the fraud risk engine (score >0.7)
+When the transaction is submitted
+Then the transaction is held (not posted)
+And I receive a push notification within 3 seconds
+With: merchant name, amount, location, and Approve/Decline buttons
+
+Given I tap ""Approve"" on a fraud alert
+When the approval is processed
+Then the transaction is posted to my account
+And the risk model learns from my feedback
+
+Given I tap ""Decline"" on a fraud alert
+When the decline is processed
+Then the transaction is rejected
+And my card is temporarily blocked
+And I am prompted to call customer service or unblock via app
+
+Given I do not respond to the alert within 10 minutes
+When the timeout occurs
+Then the transaction is auto-declined
+And I receive a follow-up email
+And the case is escalated to the fraud team","ML/AI: Real-time fraud scoring model (XGBoost/TensorFlow); feature engineering from transaction stream
+Stream Processing: Apache Kafka + Flink for sub-second risk scoring; event-driven architecture
+Backend: Transaction hold/release API; card block/unblock integration with card processor (Visa/Mastercard)
+Mobile: Rich push notifications with action buttons; in-app fraud center; card management controls
+Database: Fraud case management; customer feedback loop for model retraining; false positive tracking
+SLA: <3 second end-to-end latency; 99.999% availability; model serving via ML platform (SageMaker/Vertex AI)",8
+FR-002: Behavioral Biometric Authentication,"As a risk operations manager, I want to continuously authenticate users via behavioral biometrics (typing rhythm, swipe patterns), so that frictionless fraud detection occurs in the background without bothering legitimate users.","Given a user is logged in and navigating the app
+When their behavioral pattern deviates significantly (>2 std dev)
+Then the risk score is elevated
+And a silent challenge is triggered (invisible to user)
+
+Given the silent challenge fails
+When the failure is confirmed
+Then the session is terminated
+And the user is forced to re-authenticate with MFA
+And a security alert is logged in SIEM
+
+Given the behavioral model has insufficient data
+When a new user logs in (<5 sessions)
+Then the model operates in ""learning mode"" only
+And no blocking decisions are made
+
+Given the model flags a session as high-risk
+When the risk score exceeds 0.85
+Then the case is queued for manual review by the fraud team
+And the user session is monitored in real-time","ML/AI: Behavioral biometric model (keystroke dynamics, mouse/touch gestures, device tilt); anomaly detection using Isolation Forest/Autoencoders
+Mobile SDK: Native SDK capturing behavioral signals (typing cadence, swipe velocity, pressure); on-device feature extraction
+Backend: Risk scoring microservice; session telemetry aggregation; real-time decision engine
+Security: Differential privacy for behavioral data storage; model bias auditing; GDPR compliance for biometric data
+Integration: SIEM (Splunk/QRadar) for alert forwarding; SOAR platform for automated response; case management API
+Privacy: Explicit consent management; data retention policy (90 days); right-to-deletion support",13
+RG-001: Automated CTR (Currency Transaction Report) Filing,"As a BSA/AML compliance officer, I want to automatically generate and file CTRs for cash transactions >$10,000, so that we meet FinCEN requirements without manual data entry.","Given a customer deposits $12,000 cash at a branch
+When the teller completes the transaction
+Then the system auto-generates a CTR with:
+  - Customer profile data (name, TIN, address, occupation)
+  - Transaction details (date, amount, type, account)
+  - Beneficial owner information if applicable
+
+Given the CTR is generated
+When it is submitted for review
+Then the compliance officer can edit fields if needed
+And add suspicious activity notes
+And approve or reject the filing
+
+Given the CTR is approved
+When the filing deadline approaches (day 14)
+Then the system auto-submits to FinCEN BSA E-Filing
+And generates a confirmation receipt with BSA ID
+And archives the filing for 5 years
+
+Given a customer has multiple transactions on the same day
+When the aggregated amount exceeds $10,000
+Then the system flags the aggregation
+And generates a single CTR with all transaction details","Backend: CTR generation engine; FinCEN BSA E-Filing API integration (XML batch submission); BSA ID tracking
+Database: CTR schema with FinCEN Form 104 fields; aggregation logic for multiple transactions; audit trail
+Workflow: Approval workflow with compliance officer queue; escalation for SAR referral
+Core Banking: Real-time transaction monitoring for $10K+ threshold; teller system integration
+Document: XML generation per FinCEN specifications; PDF receipt generation; 5-year WORM storage
+Scheduling: Automated submission job (day 14 trigger); deadline monitoring; failure retry logic
+Reporting: CTR filing dashboard; exception reports; reconciliation with FinCEN acknowledgments",8
+RG-002: GDPR Data Subject Access Request (DSAR) Portal,"As a data privacy officer, I want to provide a self-service portal for customers to request their personal data, so that we comply with GDPR Article 15 and respond within 30 days.","Given I am a customer in the EU
+When I navigate to ""Privacy Center"" → ""Request My Data""
+Then I can submit a DSAR with identity verification
+And select: all data, specific date range, or specific categories
+
+Given a DSAR is submitted
+When the request is logged
+Then I receive a confirmation with a tracking number
+And the system creates a case for the privacy team
+And a 30-day countdown timer begins
+
+Given the DSAR is being processed
+When the privacy team compiles the data
+Then the system aggregates data from:
+  - Core banking system (accounts, transactions)
+  - CRM (marketing preferences, call recordings)
+  - Credit bureau inquiries
+  - Third-party payment processors
+And excludes other customers' data and trade secrets
+
+Given the DSAR response is ready
+When the privacy team approves the package
+Then I receive a secure download link
+And the data is provided in a machine-readable format (JSON/CSV)
+And the response is retained for audit purposes","Frontend: Self-service privacy portal; identity verification (IDV) integration; request tracking UI
+Backend: DSAR case management API; 30-day SLA countdown timer; automated data aggregation pipeline
+Data Integration: ETL jobs from core banking, CRM, call center, credit bureau, payment processors; PII correlation
+Security: Data anonymization for other customers; redaction engine for trade secrets; encryption of response package
+Storage: Secure temporary storage (S3 with presigned URLs); auto-expiry after download; audit logging
+Compliance: GDPR Article 15 workflow; identity verification strength (KYC level); right-to-restriction support
+Reporting: DSAR metrics dashboard; SLA compliance tracking; regulatory audit export",13
+CB-001: Multi-Level Approval Workflow for Wire Transfers,"As a corporate CFO, I want to require dual approval for wire transfers above $100,000, so that we enforce segregation of duties and prevent unauthorized payments.","Given I am a user with ""wire initiator"" role
+When I initiate a wire transfer >$100,000
+Then the transfer status is ""Pending Approval""
+And I cannot approve my own transfer
+
+Given I am a user with ""wire approver"" role
+When I view pending approvals
+Then I see the transfer details: amount, beneficiary, purpose, supporting docs
+And I can ""Approve"", ""Reject"", or ""Request More Info""
+
+Given a transfer is approved by the first approver
+When the second approver logs in
+Then they see the transfer with first approver's name and timestamp
+And their approval completes the workflow
+
+Given a transfer is rejected
+When the rejection is submitted
+Then the initiator receives a notification with the reason
+And the transfer is archived with audit trail
+
+Given I want to configure approval thresholds
+When I access ""Admin → Approval Policies""
+Then I can set: amount thresholds, number of approvers, and eligible roles
+And changes are effective immediately for new transfers","Backend: Workflow engine (Camunda/Temporal) for multi-stage approval; role-based access control (RBAC)
+Security: Cryptographic signing of approvals (HSM-backed); immutable audit trail (blockchain/WORM storage)
+Database: Approval policy configuration; workflow instance tracking; approval history with digital signatures
+Frontend: Corporate banking portal with approval inbox; document viewer; policy admin UI
+Integration: Wire transfer API (SWIFT/Fedwire); ERP connector for beneficiary validation; sanctions screening pre-approval
+Notifications: Email + SMS + in-app for approval requests, reminders, and completions
+Compliance: SOX 404 control documentation; quarterly access recertification; segregation of duties validation",13
+CB-002: Cash Position Dashboard,"As a corporate treasurer, I want to see a real-time consolidated cash position across all accounts and currencies, so that I can optimize liquidity and make informed investment decisions.","Given I log in to the corporate treasury portal
+When I view the ""Cash Position"" dashboard
+Then I see:
+  - Total consolidated balance in base currency (USD)
+  - Breakdown by: account, entity, currency, bank
+  - Intraday vs. prior day close comparison
+  - Liquidity classification (available, pending, restricted)
+
+Given I have accounts in EUR, GBP, and JPY
+When I view the dashboard
+Then all balances are converted to USD using real-time FX rates
+And I can toggle to view in any currency
+
+Given I want to drill down
+When I click on a specific entity
+Then I see account-level details with last transaction timestamp
+And I can export to Excel or PDF
+
+Given I want to set alerts
+When I configure a threshold (e.g., balance <$1M)
+Then I receive an email/SMS alert when the threshold is breached
+And the alert includes recommended actions (sweep, drawdown)","Backend: Treasury data aggregation engine; real-time account balance feeds from multiple banks (BAI2/MT940/ISO 20022)
+Frontend: React/Angular dashboard with D3.js charts; AG Grid for data tables; currency toggle
+Data: FX rate service integration (Refinitiv/Bloomberg API); currency conversion with rate timestamp
+Integration: Multi-bank connectivity via SWIFT or API; ERP integration (SAP/Oracle); TMS connector
+Alerts: Rule engine for threshold monitoring; notification service (email/SMS/push); recommended action logic
+Security: Entity-level data segregation; role-based entity access; MFA for treasury portal
+Reporting: Scheduled report generation; PDF/Excel export; API for data warehouse ingestion",8
+KYC-001: Digital Identity Verification with Liveness Detection,"As a prospective customer, I want to verify my identity by scanning my ID and taking a selfie with liveness detection, so that I can open an account remotely without visiting a branch.","Given I am on the identity verification step
+When I scan my driver's license or passport
+Then the system:
+  - Extracts name, DOB, ID number, and expiry date via OCR/MRZ
+  - Validates the document's security features (hologram, font)
+  - Checks against known fraudulent document database
+
+Given my ID is successfully scanned
+When I proceed to selfie capture
+Then the system:
+  - Requires a liveness challenge (blink, turn head, smile)
+  - Compares the selfie to the ID photo with >95% confidence
+  - Detects spoofing attempts (screen replay, mask, deepfake)
+
+Given identity verification succeeds
+When the process completes
+Then I am notified within 30 seconds
+And I can proceed to fund my account
+And the KYC record is stored encrypted for 7 years
+
+Given identity verification fails
+When the failure reason is determined
+Then I see a specific message:
+  - ""Document unclear — please retake""
+  - ""Identity mismatch — contact support""
+  - ""System error — try again later""
+And failed attempts are limited to 3 per session","Mobile: Camera integration with auto-capture; document alignment guides; real-time quality checks
+AI/ML: OCR engine (Google Vision/AWS Textract); MRZ parsing for passports; liveness detection (iBeta PAD Level 2)
+Face Matching: 1:1 facial comparison using deep learning model (FaceNet/ArcFace); anti-spoofing (depth analysis, texture analysis)
+Backend: IDV orchestration API; fraud document database lookup; KYC record creation
+Security: Document encryption (AES-256); PII tokenization; 7-year retention with access controls
+Integration: Core banking account creation API; CIP compliance validation; sanctions screening (OFAC)
+Performance: <30 second end-to-end processing; 99.9% uptime; model inference <2 seconds",13
+KYC-002: Beneficial Ownership Collection for Business Accounts,"As a small business owner, I want to provide my company's beneficial ownership information during account opening, so that the bank complies with FinCEN's CDD Rule while I complete everything in one session.","Given I am opening a business account
+When I reach the ""Beneficial Ownership"" step
+Then I am informed that I must provide:
+  - Individuals owning ≥25% of the business
+  - One control person (CEO, CFO, etc.)
+  - Name, address, DOB, SSN, and ownership % for each
+
+Given I enter beneficial owner details
+When I submit the information
+Then the system validates against:
+  - OFAC sanctions list
+  - Politically Exposed Persons (PEP) database
+  - Adverse media screening
+And flags any matches for enhanced due diligence
+
+Given I have a complex ownership structure (LLC owned by Trust)
+When I indicate this structure
+Then the system guides me through a nested ownership flow
+And calculates ultimate beneficial ownership percentages
+
+Given I want to update beneficial ownership later
+When I navigate to ""Account Settings → Business Info""
+Then I can edit ownership details
+And the system creates a new version with audit trail
+And prompts for re-verification if ownership changes >25%","Frontend: Dynamic form builder for nested ownership structures; ownership percentage calculator; entity type conditional logic
+Backend: Beneficial ownership data model supporting recursive ownership (LLC → Trust → Individual); version control
+Integration: Sanctions screening API (Refinitiv World-Check/Dow Jones); PEP database; adverse media search API
+Database: BO schema with UBO calculation; change detection; audit trail with immutable versioning
+Compliance: FinCEN CDD Rule data collection; 31 CFR 1010.230 compliance; record retention (5 years post-closure)
+Workflow: Enhanced Due Diligence (EDD) case creation for PEP/sanctions hits; manual review queue
+Security: Ownership data encryption; access restricted to compliance and relationship managers; data minimization",8
+WM-001: Goal-Based Investment Portfolio,"As a retail investor, I want to set financial goals (retirement, education, home purchase) and get a recommended portfolio, so that my investments align with my life objectives and risk tolerance.","Given I am a new wealth management client
+When I complete the onboarding questionnaire
+Then the system assesses:
+  - Risk tolerance (1-5 scale via validated questionnaire)
+  - Time horizon per goal
+  - Liquidity needs
+  - Tax situation
+And generates a personalized portfolio recommendation
+
+Given I have set a ""Retirement at 65"" goal
+When I view my goal dashboard
+Then I see:
+  - Target amount (calculated from income replacement needs)
+  - Current progress (% funded)
+  - Monthly contribution needed to stay on track
+  - Probability of success (Monte Carlo simulation)
+
+Given market conditions change significantly
+When my portfolio drifts >5% from target allocation
+Then I receive a rebalance recommendation
+And I can approve the rebalance with one tap
+Or schedule it for a specific date
+
+Given I want to adjust my goal
+When I edit the target amount or timeline
+Then the system recalculates the portfolio
+And shows me the impact on expected returns and risk","Backend: Goal-based optimization engine (Black-Litterman/Monte Carlo); portfolio recommendation algorithm
+Frontend: Interactive goal dashboard; risk questionnaire UI; portfolio visualization (allocation charts, glide path)
+Data: Market data feed (Bloomberg/refinitiv); historical returns database; goal projection calculations
+Integration: Custodian/trading API for rebalancing; tax lot optimization engine; advisory fee calculation
+Security: Suitability rule engine (SEC compliance); fiduciary duty disclosure; best interest validation
+Analytics: Goal tracking metrics; probability of success modeling; drift monitoring and alerting
+Compliance: SEC Investment Advisers Act; Form ADV disclosure; suitability documentation; record retention",13
+WM-002: Tax-Loss Harvesting Automation,"As a high-net-worth client, I want to automatically harvest tax losses in my taxable investment account, so that I minimize my tax burden while maintaining my target asset allocation.","Given I have a taxable brokerage account
+When a security has an unrealized loss >$5,000
+And it has been held >30 days (to avoid wash sale rules)
+Then the system flags it as a tax-loss harvesting candidate
+And I receive a notification with the estimated tax savings
+
+Given I approve a tax-loss harvest trade
+When the trade executes
+Then the system:
+  - Sells the losing security
+  - Buys a substantially similar (but not identical) replacement
+  - Ensures no wash sale violation (30-day rule)
+  - Updates the cost basis records
+
+Given a harvested loss is realized
+When tax reporting season arrives
+Then the system generates Form 1099-B with proper adjustments
+And provides a summary of harvested losses for my tax advisor
+
+Given I want to disable tax-loss harvesting
+When I toggle the setting off
+Then no automated harvesting occurs
+And existing harvested losses remain on record","Backend: Tax-loss harvesting engine; unrealized loss scanner; wash sale detection algorithm (30-day rule)
+Trading: Automated sell/buy order generation; replacement security selection (similar but not identical); tax lot optimization
+Database: Cost basis tracking with wash sale adjustments; harvested loss ledger; replacement security mapping
+Integration: Brokerage trading API; tax reporting system (Form 1099-B generation); tax advisor portal API
+Compliance: IRS Publication 550 compliance; wash sale rule (IRC Section 1091); short-term vs long-term loss tracking
+Security: Trading authorization validation; HNW account segmentation; automated vs manual approval thresholds
+Reporting: Annual tax loss summary; realized vs unrealized P&L; Form 1099-B adjustments; advisor dashboard",8

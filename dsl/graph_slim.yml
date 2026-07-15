@@ -1,0 +1,221 @@
+# ============================================================================
+# Story Pointer — Slim-backed variant (native graphon `llm` nodes)
+# ============================================================================
+# This variant uses graphon's native `llm` node, which talks to the model
+# through the `dify-plugin-daemon-slim` runtime + Dify marketplace plugins.
+#
+# Requirements (beyond the http variant):
+#   - `graphon` installed
+#   - `dify-plugin-daemon-slim` binary on PATH (or via SLIM_BINARY_PATH)
+#   - matching model_credentials in credentials.json
+#   - LLM_EXECUTION_MODE=slim
+#
+# Trade-off vs graph_http.yml: you get true token-level streaming and
+# structured-output parsing from SlimLLM, at the cost of operational weight.
+#
+# The invariant gate (code node) is IDENTICAL to the http variant — it does not
+# depend on how the model was reached.
+# ============================================================================
+kind: graph
+
+dependencies:
+  # Swap the plugin identifier for the provider you actually use.
+  # Examples:
+  #   OpenAI:    langgenius/openai:<version>@<hash>
+  #   Anthropic: anthropic/claude:<version>@<hash>
+  #   Groq:      langgenius/groq:<version>@<hash>
+  - type: marketplace
+    value:
+      marketplace_plugin_unique_identifier: langgenius/openai:0.3.8@592c8252795b5f75807de2d609a03196ed02596b409f7642b4a07548c7ff57ef
+
+graph:
+  nodes:
+    # ----------------------------------------------------------------------
+    # 1. START
+    # ----------------------------------------------------------------------
+    - id: start
+      data:
+        type: start
+        title: Start
+        variables:
+          - variable: title
+            type: text
+            label: Story title
+            required: true
+          - variable: description
+            type: paragraph
+            label: Description
+            required: false
+          - variable: acceptance_criteria
+            type: paragraph
+            label: Acceptance criteria
+            required: false
+          - variable: context
+            type: paragraph
+            label: Extra context
+            required: false
+
+    # ----------------------------------------------------------------------
+    # 2. BUILD_PROMPT — same rubric + anchors block as the http variant
+    # ----------------------------------------------------------------------
+    - id: build_prompt
+      data:
+        type: template-transform
+        title: Build Prompt
+        template: |-
+          SCORE THE STORY ON ALL 12 FACTORS (Low/Medium/High), each with evidence:
+          - requirements_clarity, technical_complexity, integration_surface,
+            data_model_change, frontend_effort, backend_effort, test_effort,
+            regulatory_compliance, security_review, observability_ops,
+            cross_team_dependency, reversibility
+          (Score each Low/Medium/High with a one-line evidence note.)
+
+          CALIBRATION ANCHORS (map the story to these):
+          - 1 pt: trivial tweak. ~0.5 pd.
+          - 2 pts: small well-understood. ~1 pd.
+          - 3 pts: standard small feature. ~2-3 pd.
+          - 5 pts: moderate feature. ~4-6 pd.
+          - 8 pts: large feature. ~7-10 pd.
+          - 13 pts: TOO BIG, must split. ~11-15 pd.
+
+          TITLE: {{ title }}
+          DESCRIPTION: {{ description }}
+          ACCEPTANCE CRITERIA:
+          {{ acceptance_criteria }}
+          {% if context %}CONTEXT: {{ context }}{% endif %}
+
+          Return STRICT JSON only with: factors[], deciding_drivers[],
+          closest_anchors[], points, plain_language_why, tldr, per_layer_effort{},
+          person_days{min,max}, hidden_work[], risks[], assumptions[],
+          spike_needed, spike_reason, must_split, recommended_split[].
+        variables:
+          - variable: title
+            value_selector: [start, title]
+          - variable: description
+            value_selector: [start, description]
+          - variable: acceptance_criteria
+            value_selector: [start, acceptance_criteria]
+          - variable: context
+            value_selector: [start, context]
+
+    # ----------------------------------------------------------------------
+    # 3. ESTIMATE — native graphon LLM node (Slim-backed)
+    # ----------------------------------------------------------------------
+    - id: estimate
+      data:
+        type: llm
+        title: Estimate (Slim LLM)
+        model:
+          provider: openai
+          name: gpt-4o-mini
+          mode: chat
+          completion_params:
+            temperature: 0.2
+            max_tokens: 2400
+            response_format:
+              type: json_object
+        prompt_template:
+          - role: system
+            text: |-
+              You are Story Pointer, an evidence-led story-point estimator for
+              React/Spring delivery teams in a regulated (banking) environment.
+              Score all 12 factors with evidence, identify 2-3 deciding drivers,
+              compare against the 6 anchors, ONLY THEN conclude a Fibonacci value.
+              A point value is NEVER shown without plain_language_why and tldr.
+              A 13 must be split into >=2 sub-stories each <=8. STRICT JSON only.
+          - role: user
+            text: "{{#build_prompt.output#}}"
+        context:
+          enabled: false
+          variable_selector: []
+        vision:
+          enabled: false
+
+    # ----------------------------------------------------------------------
+    # 4. NORMALIZE — pull text from the Slim LLM result
+    # ----------------------------------------------------------------------
+    - id: normalize
+      data:
+        type: code
+        title: Normalize Response
+        variables:
+          - variable: text
+            value_selector: [estimate, text]
+        code_language: python3
+        code: |-
+          def main(text: str) -> dict:
+              import json, re
+              t = (text or "").strip()
+              if t.startswith("```"):
+                  t = re.sub(r"^```(?:json)?\s*", "", t)
+                  t = re.sub(r"\s*```$", "", t)
+              m = re.search(r"\{.*\}", t, re.DOTALL)
+              parsed = json.loads(m.group(0)) if m else {}
+              return {"parsed": parsed, "raw": text}
+
+    # ----------------------------------------------------------------------
+    # 5. GATE — identical invariant to graph_http.yml
+    # ----------------------------------------------------------------------
+    - id: gate
+      data:
+        type: code
+        title: Invariant Gate
+        variables:
+          - variable: parsed
+            value_selector: [normalize, parsed]
+        code_language: python3
+        code: |-
+          def main(parsed: dict) -> dict:
+              valid_points = {1, 2, 3, 5, 8, 13}
+              why = str(parsed.get("plain_language_why", "")).strip()
+              tldr = str(parsed.get("tldr", "")).strip()
+              pts = parsed.get("points")
+              try:
+                  pts = int(pts)
+              except Exception:
+                  pts = None
+              ok = bool(why and tldr and pts in valid_points)
+              error = "" if ok else "Invariant violation: estimate incomplete."
+              must_split = bool(parsed.get("must_split")) or pts == 13
+              split = [s for s in (parsed.get("recommended_split") or [])
+                       if s.get("title") and s.get("points") in {1,2,3,5,8}][:3]
+              if must_split and len(split) < 2:
+                  ok = False
+                  error = "Invariant violation: a 13 must split into >=2 sub-stories <=8."
+                  pts = None
+              result = dict(parsed)
+              result.update(ok=ok, error=error, points=(pts if ok else None),
+                            must_split=must_split, recommended_split=split)
+              return {"result": result}
+
+    # ----------------------------------------------------------------------
+    # 6. RENDER + ANSWER
+    # ----------------------------------------------------------------------
+    - id: render
+      data:
+        type: template-transform
+        title: Render
+        template: "{{ result_json }}"
+        variables:
+          - variable: result_json
+            value_selector: [gate, result]
+
+    - id: answer
+      data:
+        type: answer
+        title: Answer
+        answer: "{{#render.output#}}"
+
+  edges:
+    - source: start
+      target: build_prompt
+    - source: build_prompt
+      target: estimate
+    - source: estimate
+      target: normalize
+    - source: normalize
+      target: gate
+    - source: gate
+      target: render
+    - source: render
+      target: answer

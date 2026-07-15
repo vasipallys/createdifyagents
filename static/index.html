@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Story Pointer</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2230;
+    --panel-2: #222d3f;
+    --text: #e6edf3;
+    --muted: #8b9bb4;
+    --accent: #4a9eff;
+    --green: #2ea043;
+    --amber: #d29922;
+    --red: #f85149;
+    --border: #2d3b50;
+    --mono: "JetBrains Mono", "SF Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+  }
+  header {
+    padding: 16px 24px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { margin: 0; font-size: 18px; }
+  header .badge {
+    font-size: 11px; padding: 3px 8px; border-radius: 4px;
+    background: var(--panel-2); color: var(--muted);
+    font-family: var(--mono);
+  }
+  header a.badge { text-decoration: none; }
+  header .header-links { display: flex; gap: 8px; align-items: center; }
+  .container {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    padding: 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  @media (max-width: 900px) { .container { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 18px;
+  }
+  .panel h2 { margin: 0 0 14px; font-size: 15px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, textarea, select {
+    width: 100%; padding: 9px 11px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+    font-size: 14px; font-family: inherit;
+  }
+  textarea { min-height: 70px; resize: vertical; font-family: var(--mono); font-size: 13px; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button {
+    padding: 10px 18px; border: none; border-radius: 6px; font-size: 14px;
+    font-weight: 600; cursor: pointer; background: var(--accent); color: white;
+  }
+  button:hover { opacity: 0.9; }
+  button.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .actions { margin-top: 16px; display: flex; gap: 10px; }
+
+  /* result card */
+  .result-empty { color: var(--muted); font-style: italic; padding: 30px 0; text-align: center; }
+  .status-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--panel-2); border-radius: 6px; margin-bottom: 12px; font-size: 13px; }
+  .status-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  .points-hero {
+    display: flex; align-items: baseline; gap: 14px; padding: 16px; border-radius: 8px;
+    background: linear-gradient(135deg, #1f2d47, #243450); border: 1px solid var(--border);
+    margin-bottom: 14px;
+  }
+  .points-hero .num { font-size: 48px; font-weight: 800; color: var(--accent); font-family: var(--mono); line-height: 1; }
+  .points-hero .unit { color: var(--muted); font-size: 14px; }
+  .points-hero .tldr { margin-left: auto; text-align: right; max-width: 55%; }
+  .points-hero .tldr-text { font-size: 14px; }
+
+  .must-split-banner {
+    background: rgba(248,81,73,0.12); border: 1px solid var(--red); color: var(--red);
+    padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 13px; font-weight: 600;
+  }
+  .invariant-warn {
+    background: rgba(210,153,34,0.12); border: 1px solid var(--amber); color: var(--amber);
+    padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 13px;
+  }
+
+  .section { margin-bottom: 16px; }
+  .section h3 { margin: 0 0 8px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+  .why { font-size: 14px; padding: 12px; background: var(--panel-2); border-radius: 6px; border-left: 3px solid var(--accent); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .factor { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: var(--panel-2); border-radius: 5px; font-size: 13px; }
+  .factor .lvl { font-size: 11px; padding: 2px 7px; border-radius: 3px; font-weight: 600; }
+  .lvl-Low { background: rgba(46,160,67,0.2); color: var(--green); }
+  .lvl-Medium { background: rgba(210,153,34,0.2); color: var(--amber); }
+  .lvl-High { background: rgba(248,81,73,0.2); color: var(--red); }
+  .factor .ev { color: var(--muted); font-size: 12px; margin-left: 8px; }
+
+  .list { list-style: none; padding: 0; margin: 0; }
+  .list li { padding: 6px 10px; background: var(--panel-2); border-radius: 5px; margin-bottom: 4px; font-size: 13px; }
+  .pill-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pill { padding: 4px 10px; border-radius: 12px; background: var(--panel-2); font-size: 12px; }
+  .pill.strong { border: 1px solid var(--accent); color: var(--accent); }
+
+  .split-card { padding: 10px; background: var(--panel-2); border-radius: 6px; margin-bottom: 6px; }
+  .split-card .st { font-weight: 600; }
+  .split-card .sp { float: right; color: var(--accent); font-family: var(--mono); font-weight: 700; }
+
+  .raw-toggle { margin-top: 14px; }
+  .raw-toggle summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  pre { background: #0a0e14; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; }
+
+  .src-tabs { display: flex; gap: 4px; margin-bottom: 14px; }
+  .src-tabs button { flex: 1; padding: 8px; font-size: 13px; background: var(--panel-2); border: 1px solid var(--border); }
+  .src-tabs button.active { background: var(--accent); border-color: var(--accent); }
+  .src-panel { display: none; }
+  .src-panel.active { display: block; }
+  .err { color: var(--red); font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎯 Story Pointer <span class="badge" id="model-badge">…</span></h1>
+  <div class="header-links">
+    <a class="badge" id="phoenix-link" href="#" target="_blank" rel="noopener" style="display:none">Phoenix monitoring ↗</a>
+    <span class="badge">evidence-led estimation</span>
+  </div>
+</header>
+
+<div class="container">
+  <!-- =========================== INPUT =========================== -->
+  <section class="panel" id="input-panel">
+    <h2>Story</h2>
+    <div class="src-tabs">
+      <button class="active" data-src="manual" onclick="switchSrc('manual')">Manual</button>
+      <button data-src="jira" onclick="switchSrc('jira')">Jira</button>
+      <button data-src="sheet" onclick="switchSrc('sheet')">Spreadsheet</button>
+    </div>
+
+    <!-- manual -->
+    <div class="src-panel active" id="src-manual">
+      <label>Title *</label>
+      <input id="m_title" placeholder="e.g. Add transaction dispute workflow" />
+      <label>Description</label>
+      <textarea id="m_desc" placeholder="As a customer, I want to dispute a transaction…"></textarea>
+      <label>Acceptance criteria (one per line)</label>
+      <textarea id="m_ac" placeholder="- Given a posted transaction
+- When the customer opens dispute
+- Then a case is created"></textarea>
+      <label>Context (optional)</label>
+      <input id="m_ctx" placeholder="links, tech notes…" />
+    </div>
+
+    <!-- jira -->
+    <div class="src-panel" id="src-jira">
+      <div id="jira_instances_empty" class="result-empty" style="padding:14px 0">
+        No Jira instances configured. Set <code>JIRA_INSTANCES</code> in .env.
+      </div>
+      <div id="jira_fields" style="display:none">
+        <label>Instance</label>
+        <select id="j_instance"></select>
+        <label>Issue key *</label>
+        <input id="j_issue" placeholder="PROJ-123" />
+        <div class="actions">
+          <button class="secondary" onclick="fetchJira()">Fetch story</button>
+        </div>
+        <div id="jira_preview" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <!-- spreadsheet -->
+    <div class="src-panel" id="src-sheet">
+      <label>Upload CSV / XLS / XLSX</label>
+      <input type="file" id="sheet_file" accept=".csv,.xls,.xlsx" onchange="uploadSheet()" />
+      <div id="sheet_preview" style="margin-top:12px"></div>
+    </div>
+
+    <div class="actions">
+      <button id="estimate-btn" onclick="runEstimate()">Estimate</button>
+      <button class="secondary" onclick="clearAll()">Clear</button>
+    </div>
+    <div id="err" class="err"></div>
+  </section>
+
+  <!-- =========================== RESULT =========================== -->
+  <section class="panel" id="result-panel">
+    <h2>Estimate</h2>
+    <div id="result-body">
+      <div class="result-empty">Run an estimate to see the evidence-led result here.</div>
+    </div>
+  </section>
+</div>
+
+<script>
+// ============================================================================
+// CORE PRODUCT INVARIANT — enforced client-side INDEPENDENTLY of the backend.
+// ResultCard refuses to render a number unless plain_language_why + tldr exist.
+// ============================================================================
+function invariantSatisfied(r) {
+  return r && r.ok === true
+    && r.points != null && [1,2,3,5,8,13].includes(r.points)
+    && typeof r.plain_language_why === "string" && r.plain_language_why.trim()
+    && typeof r.tldr === "string" && r.tldr.trim();
+}
+
+const $ = (id) => document.getElementById(id);
+
+// ---- source tabs ----
+function switchSrc(name) {
+  document.querySelectorAll(".src-tabs button").forEach(b => b.classList.toggle("active", b.dataset.src === name));
+  document.querySelectorAll(".src-panel").forEach(p => p.classList.toggle("active", p.id === "src-" + name));
+}
+
+// ---- config ----
+async function loadConfig() {
+  try {
+    const r = await fetch("/config").then(r => r.json());
+    $("model-badge").textContent = `${r.provider} · ${r.model}` + (r.has_api_key ? "" : " · ⚠ no key");
+    window.__observability = r.observability || null;
+    if (r.observability && r.observability.enabled && r.observability.ui_url) {
+      const phoenixLink = $("phoenix-link");
+      phoenixLink.href = r.observability.ui_url;
+      phoenixLink.style.display = "inline-block";
+      phoenixLink.title = `Phoenix project: ${r.observability.project_name}`;
+    }
+    if (r.jira_instances && r.jira_instances.length) {
+      $("jira_instances_empty").style.display = "none";
+      $("jira_fields").style.display = "block";
+      $("j_instance").innerHTML = r.jira_instances.map(n => `<option>${n}</option>`).join("");
+    }
+  } catch (e) { console.warn(e); }
+}
+
+// ---- gather story from the active source ----
+function currentStory() {
+  const active = document.querySelector(".src-tabs button.active").dataset.src;
+  if (active === "manual") {
+    const ac = $("m_ac").value.split("\n").map(s => s.trim().replace(/^[-*]\s*/, "")).filter(Boolean);
+    return {
+      title: $("m_title").value.trim(),
+      description: $("m_desc").value,
+      acceptance_criteria: ac,
+      context: $("m_ctx").value,
+      source: "manual",
+    };
+  }
+  if (active === "jira") {
+    return window.__jira_story || null;
+  }
+  if (active === "sheet") {
+    return window.__sheet_stories && window.__sheet_stories.length ? window.__sheet_stories[0] : null;
+  }
+  return null;
+}
+
+// ---- Jira fetch ----
+async function fetchJira() {
+  $("err").textContent = "";
+  const inst = $("j_instance").value;
+  const issue = $("j_issue").value.trim();
+  if (!issue) return;
+  try {
+    const r = await fetch("/jira/fetch", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ instance: inst, issue }),
+    }).then(r => r.json());
+    if (r.detail) { $("err").textContent = r.detail; return; }
+    window.__jira_story = r;
+    $("jira_preview").innerHTML = `<div class="pill-row"><span class="pill strong">${escapeHtml(r.title)}</span></div>`;
+  } catch (e) { $("err").textContent = e; }
+}
+
+// ---- Spreadsheet ----
+async function uploadSheet() {
+  $("err").textContent = "";
+  const f = $("sheet_file").files[0];
+  if (!f) return;
+  const fd = new FormData();
+  fd.append("file", f);
+  try {
+    const r = await fetch("/upload", { method: "POST", body: fd }).then(r => r.json());
+    if (r.detail) { $("err").textContent = r.detail; return; }
+    window.__sheet_stories = r.stories || [];
+    $("sheet_preview").innerHTML = `<div class="pill-row"><span class="pill strong">${r.count} stories parsed</span>` +
+      r.stories.slice(0, 5).map(s => `<span class="pill">${escapeHtml(s.title)}</span>`).join("") +
+      `</div>`;
+  } catch (e) { $("err").textContent = e; }
+}
+
+// ---- Estimation via SSE ----
+// EventSource only supports GET. This endpoint is POST-based, so use fetch's
+// ReadableStream directly and own the request lifecycle with AbortController.
+let estimateController = null;
+async function runEstimate() {
+  $("err").textContent = "";
+  const story = currentStory();
+  if (!story || !story.title) {
+    $("err").textContent = "Provide a story with a title first.";
+    return;
+  }
+  $("estimate-btn").disabled = true;
+  $("result-body").innerHTML = renderStatus("Starting…");
+
+  // Cancel an older request defensively (for example if this function is
+  // called programmatically while a stream is still active).
+  if (estimateController) estimateController.abort();
+  const controller = new AbortController();
+  estimateController = controller;
+  let reader = null;
+
+  try {
+    const resp = await fetch("/estimate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+      body: JSON.stringify({ story }),
+      signal: controller.signal,
+    });
+
+    if (!resp.ok) {
+      const detail = await responseError(resp);
+      throw new Error(detail || `Estimate request failed (${resp.status}).`);
+    }
+    const contentType = resp.headers.get("content-type") || "";
+    if (!contentType.toLowerCase().includes("text/event-stream")) {
+      throw new Error(`Expected an SSE response, received ${contentType || "no content type"}.`);
+    }
+    if (!resp.body) throw new Error("This browser did not provide a readable response stream.");
+
+    reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let terminalEvent = false;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        buf += dec.decode();
+        break;
+      }
+      buf += dec.decode(value, { stream: true });
+
+      // SSE permits either LF or CRLF line endings. Keep the final incomplete
+      // frame buffered until the next network chunk arrives.
+      const parts = buf.split(/\r?\n\r?\n/);
+      buf = parts.pop() || "";
+      for (const part of parts) {
+        const evt = parseSSE(part);
+        if (!evt) continue;
+        handleSSE(evt);
+        if (evt.event === "result") terminalEvent = true;
+        if (evt.event === "error") {
+          terminalEvent = true;
+          throw new Error(evt.data.message || "The estimate stream reported an error.");
+        }
+      }
+    }
+
+    // Be tolerant of a final event that is not followed by a blank line.
+    if (buf.trim()) {
+      const evt = parseSSE(buf);
+      if (evt) {
+        handleSSE(evt);
+        if (evt.event === "result") terminalEvent = true;
+        if (evt.event === "error") throw new Error(evt.data.message || "The estimate stream reported an error.");
+      }
+    }
+
+    if (!terminalEvent) {
+      throw new Error("The estimate stream closed before returning a result.");
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") return;
+    const message = e instanceof Error ? e.message : String(e);
+    $("err").textContent = message;
+    $("result-body").innerHTML = `<div class="invariant-warn">${escapeHtml(message)}</div>`;
+  } finally {
+    if (reader) reader.releaseLock();
+    if (estimateController === controller) {
+      estimateController = null;
+      $("estimate-btn").disabled = false;
+    }
+  }
+}
+
+function parseSSE(chunk) {
+  let event = "message";
+  const dataLines = [];
+  for (const line of chunk.split(/\r?\n/)) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    else if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+  }
+  const dataStr = dataLines.join("\n");
+  if (!dataStr) return null;
+  try { return { event, data: JSON.parse(dataStr) }; } catch { return null; }
+}
+
+async function responseError(resp) {
+  const text = await resp.text();
+  if (!text) return "";
+  try {
+    const body = JSON.parse(text);
+    return body.detail || body.message || text;
+  } catch {
+    return text;
+  }
+}
+
+function handleSSE(evt) {
+  if (evt.data && evt.data.trace_id) window.__trace_id = evt.data.trace_id;
+  if (evt.event === "status") {
+    $("result-body").innerHTML = renderStatus(evt.data.message);
+  } else if (evt.event === "result") {
+    renderResult(evt.data.result);
+  }
+}
+
+// ============================================================================
+// ResultCard — THE client-side invariant enforcement
+// ============================================================================
+function renderStatus(msg) {
+  return `<div class="status-bar"><span class="dot"></span>${escapeHtml(msg || "working…")}</div>`;
+}
+
+function renderResult(r) {
+  // INVARIANT CHECK — refuse to show a number without its explanation.
+  if (!invariantSatisfied(r)) {
+    const reason = !r || r.ok === false
+      ? (r && r.error ? r.error : "Backend did not certify this estimate.")
+      : "Missing plain-language explanation.";
+    $("result-body").innerHTML = `
+      <div class="invariant-warn">
+        ⚠ <strong>No estimate shown.</strong> ${escapeHtml(reason)}<br/>
+        ResultCard refuses to render a point value without <code>plain_language_why</code> and <code>tldr</code>.
+      </div>
+      <details class="raw-toggle"><summary>raw payload</summary><pre>${escapeHtml(JSON.stringify(r, null, 2))}</pre></details>`;
+    return;
+  }
+
+  // Points hero
+  const pd = r.person_days ? `${r.person_days.min}–${r.person_days.max} person-days` : "";
+  let html = `
+    <div class="points-hero">
+      <div class="num">${r.points}</div>
+      <div class="unit">story points<br/>${pd}</div>
+      <div class="tldr"><div class="unit">TL;DR</div><div class="tldr-text">${escapeHtml(r.tldr)}</div></div>
+    </div>`;
+
+  if (r.must_split) {
+    html += `<div class="must-split-banner">⛔ This story is too big (a 13). It must be split before it can be worked on.</div>`;
+  }
+
+  // plain language why
+  html += `<div class="section"><h3>Why (for the product owner)</h3>
+    <div class="why">${escapeHtml(r.plain_language_why)}</div></div>`;
+
+  // factors
+  if (r.factors && r.factors.length) {
+    html += `<div class="section"><h3>Factor scores (${r.factors.length}/12)</h3><div class="grid2">`;
+    for (const f of r.factors) {
+      html += `<div class="factor"><span>${escapeHtml(prettyId(f.id))}<span class="ev">${escapeHtml(f.evidence || "")}</span></span><span class="lvl lvl-${f.level}">${f.level}</span></div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  // deciding drivers
+  if (r.deciding_drivers && r.deciding_drivers.length) {
+    html += `<div class="section"><h3>Deciding drivers</h3><ul class="list">`;
+    for (const d of r.deciding_drivers) {
+      html += `<li><strong>${escapeHtml(prettyId(d.id))}</strong> — ${escapeHtml(d.why)}</li>`;
+    }
+    html += `</ul></div>`;
+  }
+
+  // anchors
+  if (r.closest_anchors && r.closest_anchors.length) {
+    html += `<div class="section"><h3>Closest anchors</h3><div class="pill-row">`;
+    for (const a of r.closest_anchors) {
+      html += `<span class="pill strong">${a.points}pt — ${escapeHtml(a.why || "")}</span>`;
+    }
+    html += `</div></div>`;
+  }
+
+  // per-layer
+  const ple = r.per_layer_effort || {};
+  html += `<div class="section"><h3>Per-layer effort</h3><div class="grid2">`;
+  for (const [k, v] of Object.entries(ple)) {
+    html += `<div class="factor"><span>${k}</span><span class="lvl lvl-${v}">${v}</span></div>`;
+  }
+  html += `</div></div>`;
+
+  // hidden work
+  if (r.hidden_work && r.hidden_work.length) {
+    html += `<div class="section"><h3>Hidden work implied by ACs</h3><ul class="list">`;
+    for (const h of r.hidden_work) html += `<li>${escapeHtml(h)}</li>`;
+    html += `</ul></div>`;
+  }
+
+  // risks
+  if (r.risks && r.risks.length) {
+    html += `<div class="section"><h3>Top risks</h3><ul class="list">`;
+    for (const r2 of r.risks) {
+      html += `<li><span class="lvl lvl-${r2.severity}" style="margin-right:6px">${r2.severity}</span> ${escapeHtml(r2.description)} <span style="color:var(--muted)">— ${escapeHtml(r2.mitigation || "")}</span></li>`;
+    }
+    html += `</ul></div>`;
+  }
+
+  // assumptions + spike
+  if (r.assumptions && r.assumptions.length) {
+    html += `<div class="section"><h3>Assumptions</h3><ul class="list">`;
+    for (const a of r.assumptions) html += `<li>${escapeHtml(a)}</li>`;
+    html += `</ul></div>`;
+  }
+  if (r.spike_needed) {
+    html += `<div class="invariant-warn">🔬 Spike recommended: ${escapeHtml(r.spike_reason || "unclear requirements")}</div>`;
+  }
+
+  // split
+  if (r.recommended_split && r.recommended_split.length) {
+    html += `<div class="section"><h3>Recommended split</h3>`;
+    for (const s of r.recommended_split) {
+      html += `<div class="split-card"><span class="sp">${s.points}pt</span><div class="st">${escapeHtml(s.title)}</div><div style="color:var(--muted);font-size:12px">${escapeHtml(s.why || "")}</div></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // Correlate this rendered estimate with its end-to-end Phoenix trace.
+  if (window.__trace_id) {
+    const phoenixUrl = window.__observability && window.__observability.ui_url;
+    html += `<div class="section"><h3>Observability</h3><div class="why">` +
+      `Trace <code>${escapeHtml(window.__trace_id)}</code>` +
+      (phoenixUrl ? ` · <a href="${escapeHtml(phoenixUrl)}" target="_blank" rel="noopener">Open Phoenix monitoring ↗</a>` : "") +
+      `</div></div>`;
+  }
+
+  // raw
+  html += `<details class="raw-toggle"><summary>raw payload</summary><pre>${escapeHtml(JSON.stringify(r, null, 2))}</pre></details>`;
+
+  $("result-body").innerHTML = html;
+}
+
+function clearAll() {
+  if (estimateController) estimateController.abort();
+  ["m_title","m_desc","m_ac","m_ctx","j_issue"].forEach(id => $(id).value = "");
+  window.__jira_story = null; window.__sheet_stories = null;
+  window.__trace_id = null;
+  $("jira_preview").innerHTML = ""; $("sheet_preview").innerHTML = "";
+  $("err").textContent = "";
+  $("result-body").innerHTML = `<div class="result-empty">Run an estimate to see the evidence-led result here.</div>`;
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
+}
+function prettyId(id) {
+  return String(id).replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
+loadConfig();
+</script>
+</body>
+</html>

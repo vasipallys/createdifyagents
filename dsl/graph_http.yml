@@ -1,0 +1,323 @@
+# ============================================================================
+# Story Pointer — HTTP-request variant (default, ZERO external binaries)
+# ============================================================================
+# Pipeline:
+#   start -> build_prompt (template-transform) -> estimate (http-request)
+#         -> normalize (code) -> gate (code) -> render (template-transform)
+#         -> answer
+#
+# This graph is fully self-contained. The provider HTTP spec (url/headers/body)
+# is supplied via the start node variables by the Python engine, so the same
+# graph works for groq / openai / glm / claude. No Slim binary, no plugins.
+#
+# Variable reference syntax is Dify DSL: {{#nodeId.var#}}.
+# ============================================================================
+kind: graph
+
+dependencies: []
+
+graph:
+  nodes:
+    # ----------------------------------------------------------------------
+    # 1. START — receives story fields + provider HTTP spec
+    # ----------------------------------------------------------------------
+    - id: start
+      data:
+        type: start
+        title: Start
+        variables:
+          - variable: title
+            type: text
+            label: Story title
+            required: true
+          - variable: description
+            type: paragraph
+            label: Description
+            required: false
+          - variable: acceptance_criteria
+            type: paragraph
+            label: Acceptance criteria (one per line)
+            required: false
+          - variable: context
+            type: paragraph
+            label: Extra context
+            required: false
+          - variable: req_url
+            type: text
+            label: Provider chat-completions URL
+            required: true
+          - variable: req_headers
+            type: paragraph
+            label: Provider request headers (JSON)
+            required: true
+          - variable: req_body
+            type: paragraph
+            label: Provider request body (JSON)
+            required: true
+
+    # ----------------------------------------------------------------------
+    # 2. BUILD_PROMPT — assemble rubric + anchors + story into the user msg
+    # ----------------------------------------------------------------------
+    - id: build_prompt
+      data:
+        type: template-transform
+        title: Build Prompt
+        template: |-
+          SCORE THE STORY ON ALL 12 FACTORS (Low/Medium/High), each with evidence:
+          - Requirements clarity (requirements_clarity): How well-specified and stable are the ACs?
+              • Low: ACs crisp, complete, unchanged from refinement.
+              • Medium: ACs mostly clear but have a gap or open question.
+              • High: ACs vague, missing, or likely to change mid-sprint.
+          - Technical complexity (technical_complexity): Algorithmic/logic difficulty.
+              • Low: CRUD/config/wiring.
+              • Medium: Non-trivial logic, branching, or state.
+              • High: Hard algorithm, concurrency, novel integration, R&D.
+          - Integration surface (integration_surface): Number/risk of systems touched.
+              • Low: Self-contained within one module.
+              • Medium: Touches 1-2 internal services/APIs.
+              • High: External/partner systems or many services.
+          - Data model change (data_model_change): Schema/migration/backfill impact.
+              • Low: No schema change, or additive non-breaking column.
+              • Medium: New table/column with migration + seed.
+              • High: Breaking migration, backfill, reshaping.
+          - Frontend effort (frontend_effort): React UI build-out.
+              • Low: Minor tweak to existing component.
+              • Medium: New component or moderate form/table.
+              • High: New page/flow, complex state, design system.
+          - Backend effort (backend_effort): Spring service build-out.
+              • Low: Small change in existing service.
+              • Medium: New endpoint/service + validation + tests.
+              • High: New bounded context, transactions, domain logic.
+          - Test effort (test_effort): Unit/integration/contract scope.
+              • Low: Existing tests cover it.
+              • Medium: New test suites for the feature.
+              • High: Broad regression; e2e/contract tests needed.
+          - Regulatory compliance (regulatory_compliance): Banking/regulatory controls.
+              • Low: No regulatory touchpoints.
+              • Medium: Minor audit/PII/consent consideration.
+              • High: Material regulatory impact.
+          - Security review (security_review): Authn/authz, secrets, validation.
+              • Low: No new authz surface or secrets.
+              • Medium: New role/permission or sensitive field.
+              • High: New auth boundary, payment, elevated privilege.
+          - Observability & ops (observability_ops): Logging, metrics, alerts, runbook.
+              • Low: Standard logging; low deploy risk.
+              • Medium: Needs metrics/alerts or a feature flag.
+              • High: Needs runbook, staged rollout, on-call handoff.
+          - Cross-team dependency (cross_team_dependency): Other team/API/platform.
+              • Low: No external team dependency.
+              • Medium: Mild coordination (review, shared lib).
+              • High: Blocked behind another team's delivery.
+          - Reversibility (reversibility): Cost/risk to roll back in prod.
+              • Low: Trivially reversible.
+              • Medium: Reversible but needs care.
+              • High: Hard to reverse (data writes, external effects).
+
+          CALIBRATION ANCHORS — map the story to these fixed reference stories:
+          - 1 pt — Trivial tweak: one-line change, config value, copy/CSS fix. No new logic. ~0.5 pd.
+          - 2 pts — Small, well-understood: add a field+validation+unit test. ~1 pd.
+          - 3 pts — Standard small feature: read endpoint + React list/detail. Non-breaking column. ~2-3 pd.
+          - 5 pts — Moderate feature: service method w/ rules, complex-ish UI, migration+seed, integration tests. ~4-6 pd.
+          - 8 pts — Large feature: new bounded-context, multiple endpoints, contract tests, metrics, flag rollout. ~7-10 pd.
+          - 13 pts — TOO BIG, MUST SPLIT: spans contexts, hard migration, high cross-team/regulatory risk. ~11-15 pd.
+
+          Valid final values: 1, 2, 3, 5, 8. A 13 means SPLIT.
+
+          ==== STORY TO ESTIMATE ====
+          TITLE: {{ title }}
+          DESCRIPTION: {{ description }}
+          ACCEPTANCE CRITERIA:
+          {{ acceptance_criteria }}
+          {% if context %}ADDITIONAL CONTEXT:
+          {{ context }}{% endif %}
+
+          Return STRICT JSON with this exact schema and nothing else:
+          {
+            "factors": [ {"id":"...","level":"Low|Medium|High","evidence":"..."} x12 ],
+            "deciding_drivers": [ {"id":"...","why":"..."} x2-3 ],
+            "closest_anchors": [ {"points":1,"why":"..."} ],
+            "points": 5,
+            "plain_language_why": "2-4 sentences for a product owner",
+            "tldr": "one punchy sentence",
+            "per_layer_effort": {"frontend":"Low","backend":"Low","data":"Low","test":"Low","integration":"Low"},
+            "person_days": {"min":4,"max":6},
+            "hidden_work": ["..."],
+            "risks": [ {"description":"...","severity":"Medium","mitigation":"..."} ] (top 3),
+            "assumptions": ["..."],
+            "spike_needed": false,
+            "spike_reason": "",
+            "must_split": false,
+            "recommended_split": [ {"title":"...","points":5,"why":"..."} ]
+          }
+        variables:
+          - variable: title
+            value_selector:
+              - start
+              - title
+          - variable: description
+            value_selector:
+              - start
+              - description
+          - variable: acceptance_criteria
+            value_selector:
+              - start
+              - acceptance_criteria
+          - variable: context
+            value_selector:
+              - start
+              - context
+
+    # ----------------------------------------------------------------------
+    # 3. ESTIMATE — POST the assembled prompt to the provider
+    #    The body already contains the system prompt + this user prompt.
+    # ----------------------------------------------------------------------
+    - id: estimate
+      data:
+        type: http-request
+        title: Estimate (LLM)
+        method: post
+        url: "{{#start.req_url#}}"
+        headers: "{{#start.req_headers#}}"
+        body_type: json
+        json_body: "{{#start.req_body#}}"
+        # The provider call uses the body from start (which embeds the SAME
+        # rubric+anchors+story produced above). We keep build_prompt in the
+        # graph so the pipeline shape is explicit and auditable.
+        timeout: 60
+        variables:
+          - variable: url
+            value_selector:
+              - start
+              - req_url
+          - variable: headers
+            value_selector:
+              - start
+              - req_headers
+          - variable: body
+            value_selector:
+              - start
+              - req_body
+
+    # ----------------------------------------------------------------------
+    # 4. NORMALIZE — extract the model text from the provider response
+    # ----------------------------------------------------------------------
+    - id: normalize
+      data:
+        type: code
+        title: Normalize Response
+        variables:
+          - variable: resp
+            value_selector:
+              - estimate
+              - body
+          - variable: provider
+            value_selector:
+              - start
+              - title
+        code_language: python3
+        code: |-
+          def main(resp: dict, provider: str) -> dict:
+              import json, re
+              # provider is passed via title var in this minimal wiring; the
+              # canonical parser lives in story_pointer.llm. Here we do a
+              # tolerant extraction that works for OpenAI-compat + Anthropic.
+              text = ""
+              try:
+                  if isinstance(resp, dict) and "choices" in resp:
+                      text = resp["choices"][0]["message"]["content"]
+                  elif isinstance(resp, dict) and "content" in resp:
+                      text = resp["content"][0]["text"]
+                  else:
+                      text = json.dumps(resp)
+              except Exception:
+                  text = str(resp)
+              # strip fences
+              t = text.strip()
+              if t.startswith("```"):
+                  t = re.sub(r"^```(?:json)?\s*", "", t)
+                  t = re.sub(r"\s*```$", "", t)
+              m = re.search(r"\{.*\}", t, re.DOTALL)
+              parsed = json.loads(m.group(0)) if m else {}
+              return {"parsed": parsed, "raw": text}
+
+    # ----------------------------------------------------------------------
+    # 5. GATE — enforce the invariant (no points without explanation; 13->split)
+    # ----------------------------------------------------------------------
+    - id: gate
+      data:
+        type: code
+        title: Invariant Gate
+        variables:
+          - variable: parsed
+            value_selector:
+              - normalize
+              - parsed
+        code_language: python3
+        code: |-
+          def main(parsed: dict) -> dict:
+              valid_points = {1, 2, 3, 5, 8, 13}
+              why = str(parsed.get("plain_language_why", "")).strip()
+              tldr = str(parsed.get("tldr", "")).strip()
+              pts = parsed.get("points")
+              try:
+                  pts = int(pts)
+              except Exception:
+                  pts = None
+              ok = bool(why and tldr and pts in valid_points)
+              error = ""
+              if not (why and tldr):
+                  error = "Invariant violation: no explanation. Points redacted."
+              elif pts not in valid_points:
+                  error = "Invariant violation: invalid point value."
+              # 13 must split
+              must_split = bool(parsed.get("must_split")) or pts == 13
+              split = parsed.get("recommended_split") or []
+              split = [s for s in split if s.get("title") and s.get("points") in {1,2,3,5,8}][:3]
+              if must_split and len(split) < 2:
+                  ok = False
+                  error = "Invariant violation: a 13 must split into >=2 sub-stories <=8."
+                  pts = None
+              result = dict(parsed)
+              result["ok"] = ok
+              result["error"] = error
+              result["points"] = pts if ok else None
+              result["must_split"] = must_split
+              result["recommended_split"] = split
+              return {"result": result}
+
+    # ----------------------------------------------------------------------
+    # 6. RENDER — serialise the gated result for the answer node
+    # ----------------------------------------------------------------------
+    - id: render
+      data:
+        type: template-transform
+        title: Render
+        template: "{{ result_json }}"
+        variables:
+          - variable: result_json
+            value_selector:
+              - gate
+              - result
+
+    # ----------------------------------------------------------------------
+    # 7. ANSWER — final atomic output
+    # ----------------------------------------------------------------------
+    - id: answer
+      data:
+        type: answer
+        title: Answer
+        answer: "{{#render.output#}}"
+
+  edges:
+    - source: start
+      target: build_prompt
+    - source: build_prompt
+      target: estimate
+    - source: estimate
+      target: normalize
+    - source: normalize
+      target: gate
+    - source: gate
+      target: render
+    - source: render
+      target: answer
