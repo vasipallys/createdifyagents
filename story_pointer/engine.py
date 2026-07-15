@@ -321,6 +321,91 @@ async def stream(story: StoryInput, *, spec: ModelSpec | None = None) -> AsyncIt
             )
 
 
+async def stream_batch(
+    stories: list[StoryInput], *, spec: ModelSpec | None = None
+) -> AsyncIterator[StreamEvent]:
+    """Estimate every story through one resilient, sequential SSE stream.
+
+    Sequential execution avoids an unbounded burst of provider requests for a
+    large spreadsheet. An item failure becomes an ``item_error`` event and the
+    remaining rows continue. Nested per-story spans share one Phoenix trace.
+    """
+    settings = get_settings()
+    spec = spec or settings.model_spec()
+    settings.validate_provider_ready()
+    total = len(stories)
+    attributes = {
+        OPENINFERENCE_SPAN_KIND: CHAIN,
+        "story_pointer.transport": "sse",
+        "story_pointer.operation": "batch",
+        "story_pointer.batch.total": total,
+        "story_pointer.execution_mode": settings.llm_execution_mode,
+        "llm.provider": spec.provider,
+        "llm.model_name": spec.model,
+    }
+
+    with tracer.start_as_current_span(
+        "story_pointer.estimate.batch", attributes=attributes
+    ) as span:
+        trace_id = current_trace_id()
+        succeeded = 0
+        failed = 0
+        yield StreamEvent("batch_start", {"total": total, "trace_id": trace_id})
+
+        for index, story in enumerate(stories):
+            item = {"index": index, "total": total, "title": story.title}
+            terminal = False
+            yield StreamEvent("item_start", item)
+            try:
+                async for event in stream(story, spec=spec):
+                    if event.type == "status":
+                        yield StreamEvent("item_status", {**item, **event.data})
+                    elif event.type == "chunk":
+                        yield StreamEvent("item_chunk", {**item, **event.data})
+                    elif event.type == "result":
+                        terminal = True
+                        result = event.data.get("result", {})
+                        if result.get("ok"):
+                            succeeded += 1
+                        else:
+                            failed += 1
+                        yield StreamEvent("item_result", {**item, **event.data})
+                    elif event.type == "error":
+                        terminal = True
+                        failed += 1
+                        yield StreamEvent("item_error", {**item, **event.data})
+                if not terminal:
+                    failed += 1
+                    yield StreamEvent(
+                        "item_error",
+                        {
+                            **item,
+                            "message": "Estimation ended without a result.",
+                            "trace_id": trace_id,
+                        },
+                    )
+            except Exception as exc:  # noqa: BLE001 - isolate each row
+                failed += 1
+                log.exception("Batch item %s failed", index)
+                yield StreamEvent(
+                    "item_error",
+                    {**item, "message": str(exc), "trace_id": trace_id},
+                )
+
+        span.set_attribute("story_pointer.batch.succeeded", succeeded)
+        span.set_attribute("story_pointer.batch.failed", failed)
+        set_ok(span)
+        yield StreamEvent(
+            "batch_complete",
+            {
+                "total": total,
+                "succeeded": succeeded,
+                "failed": failed,
+                "trace_id": trace_id,
+            },
+        )
+
+
 # ===========================================================================
 # Provider HTTP call (shared by both execution modes' "estimate" stage)
 # ===========================================================================
@@ -424,4 +509,5 @@ __all__ = [
     "apply_invariant_gate",
     "estimate",
     "stream",
+    "stream_batch",
 ]

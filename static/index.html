@@ -82,6 +82,23 @@
   .status-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.4s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
 
+  .batch-toolbar { padding: 12px; background: var(--panel-2); border-radius: 7px; margin-bottom: 12px; }
+  .batch-summary { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; margin-bottom: 8px; }
+  .batch-progress { height: 7px; overflow: hidden; border-radius: 4px; background: var(--bg); }
+  .batch-progress-fill { height: 100%; background: var(--accent); transition: width 180ms ease; }
+  .batch-list { display: grid; gap: 8px; }
+  .batch-item { border: 1px solid var(--border); border-radius: 7px; background: var(--panel-2); overflow: hidden; }
+  .batch-item.failed { border-color: rgba(248,81,73,0.65); }
+  .batch-item.done { border-color: rgba(46,160,67,0.55); }
+  .batch-item summary { display: flex; align-items: center; gap: 9px; padding: 11px 12px; cursor: pointer; list-style-position: inside; }
+  .batch-index { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .batch-title { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+  .batch-meta { color: var(--muted); font-size: 12px; text-align: right; }
+  .batch-item.done .batch-meta { color: var(--green); }
+  .batch-item.failed .batch-meta { color: var(--red); }
+  .batch-detail { padding: 14px; border-top: 1px solid var(--border); background: var(--panel); }
+  .batch-detail .points-hero .num { font-size: 38px; }
+
   .points-hero {
     display: flex; align-items: baseline; gap: 14px; padding: 16px; border-radius: 8px;
     background: linear-gradient(135deg, #1f2d47, #243450); border: 1px solid var(--border);
@@ -298,8 +315,8 @@ async function uploadSheet() {
     const r = await fetch("/upload", { method: "POST", body: fd }).then(r => r.json());
     if (r.detail) { $("err").textContent = r.detail; return; }
     window.__sheet_stories = r.stories || [];
-    $("sheet_preview").innerHTML = `<div class="pill-row"><span class="pill strong">${r.count} stories parsed</span>` +
-      r.stories.slice(0, 5).map(s => `<span class="pill">${escapeHtml(s.title)}</span>`).join("") +
+    $("sheet_preview").innerHTML = `<div class="pill-row"><span class="pill strong">${r.count} stories parsed · all will be estimated</span>` +
+      r.stories.map(s => `<span class="pill">${escapeHtml(s.title)}</span>`).join("") +
       `</div>`;
   } catch (e) { $("err").textContent = e; }
 }
@@ -310,6 +327,10 @@ async function uploadSheet() {
 let estimateController = null;
 async function runEstimate() {
   $("err").textContent = "";
+  const active = document.querySelector(".src-tabs button.active").dataset.src;
+  if (active === "sheet" && window.__sheet_stories && window.__sheet_stories.length) {
+    return runBatchEstimate(window.__sheet_stories);
+  }
   const story = currentStory();
   if (!story || !story.title) {
     $("err").textContent = "Provide a story with a title first.";
@@ -399,6 +420,173 @@ async function runEstimate() {
   }
 }
 
+async function runBatchEstimate(stories) {
+  $("err").textContent = "";
+  if (!stories || !stories.length) {
+    $("err").textContent = "Upload a spreadsheet containing at least one story.";
+    return;
+  }
+
+  if (estimateController) estimateController.abort();
+  const controller = new AbortController();
+  estimateController = controller;
+  $("estimate-btn").disabled = true;
+  window.__batch_state = {
+    total: stories.length,
+    succeeded: 0,
+    failed: 0,
+    complete: false,
+    traceId: "",
+    items: stories.map((story, index) => ({
+      index, title: story.title, status: "pending", message: "Waiting…",
+      result: null, error: "", traceId: "",
+    })),
+  };
+  renderBatchResults();
+
+  let reader = null;
+  let completedEvent = false;
+  const accept = evt => {
+    if (!evt) return;
+    handleBatchSSE(evt);
+    if (evt.event === "batch_complete") completedEvent = true;
+    if (evt.event === "error") {
+      throw new Error(evt.data.message || "The batch stream reported an error.");
+    }
+  };
+
+  try {
+    const resp = await fetch("/estimate/batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "text/event-stream" },
+      body: JSON.stringify({ stories }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const detail = await responseError(resp);
+      throw new Error(detail || `Batch estimate request failed (${resp.status}).`);
+    }
+    const contentType = resp.headers.get("content-type") || "";
+    if (!contentType.toLowerCase().includes("text/event-stream")) {
+      throw new Error(`Expected an SSE response, received ${contentType || "no content type"}.`);
+    }
+    if (!resp.body) throw new Error("This browser did not provide a readable response stream.");
+
+    reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        buf += dec.decode();
+        break;
+      }
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split(/\r?\n\r?\n/);
+      buf = parts.pop() || "";
+      for (const part of parts) accept(parseSSE(part));
+    }
+    if (buf.trim()) accept(parseSSE(buf));
+    if (!completedEvent) throw new Error("The batch stream closed before all rows completed.");
+  } catch (e) {
+    if (e && e.name === "AbortError") return;
+    const message = e instanceof Error ? e.message : String(e);
+    $("err").textContent = message;
+    const state = window.__batch_state;
+    if (state) {
+      state.streamError = message;
+      renderBatchResults();
+    }
+  } finally {
+    if (reader) reader.releaseLock();
+    if (estimateController === controller) {
+      estimateController = null;
+      $("estimate-btn").disabled = false;
+    }
+  }
+}
+
+function handleBatchSSE(evt) {
+  const state = window.__batch_state;
+  if (!state || !evt || !evt.data) return;
+  const data = evt.data;
+  if (data.trace_id) {
+    state.traceId = data.trace_id;
+    window.__trace_id = data.trace_id;
+  }
+  if (evt.event === "batch_start") {
+    state.total = data.total;
+  } else if (Number.isInteger(data.index) && state.items[data.index]) {
+    const item = state.items[data.index];
+    if (data.trace_id) item.traceId = data.trace_id;
+    if (evt.event === "item_start") {
+      item.status = "running";
+      item.message = "Starting…";
+    } else if (evt.event === "item_status") {
+      item.status = "running";
+      item.message = data.message || "Working…";
+    } else if (evt.event === "item_result") {
+      item.result = data.result;
+      item.status = data.result && data.result.ok ? "done" : "failed";
+      item.error = data.result && data.result.error ? data.result.error : "";
+      item.message = item.status === "done" ? "Complete" : "Estimate was not certified";
+    } else if (evt.event === "item_error") {
+      item.status = "failed";
+      item.error = data.message || "Estimation failed.";
+      item.message = item.error;
+    }
+  }
+  if (evt.event === "batch_complete") {
+    state.complete = true;
+    state.succeeded = data.succeeded;
+    state.failed = data.failed;
+  }
+  renderBatchResults();
+}
+
+function renderBatchResults() {
+  const state = window.__batch_state;
+  if (!state) return;
+  const openItems = new Set(
+    Array.from(document.querySelectorAll(".batch-item[open]"))
+      .map(el => Number(el.dataset.index))
+  );
+  const completed = state.items.filter(item => item.status === "done" || item.status === "failed").length;
+  const succeeded = state.items.filter(item => item.status === "done").length;
+  const failed = state.items.filter(item => item.status === "failed").length;
+  const pct = state.total ? Math.round((completed / state.total) * 100) : 0;
+  let html = `<div class="batch-toolbar">
+    <div class="batch-summary"><strong>${completed}/${state.total} items complete</strong>
+      <span>${succeeded} succeeded · ${failed} failed${state.complete ? " · batch finished" : ""}</span></div>
+    <div class="batch-progress"><div class="batch-progress-fill" style="width:${pct}%"></div></div>
+  </div>`;
+  if (state.streamError) {
+    html += `<div class="invariant-warn">${escapeHtml(state.streamError)}</div>`;
+  }
+  html += `<div class="batch-list">`;
+  for (const item of state.items) {
+    let meta = item.message;
+    if (item.status === "done" && item.result) {
+      meta = `${item.result.points} points · ${item.result.tldr || "Complete"}`;
+    } else if (item.status === "failed") {
+      meta = item.error || item.message || "Failed";
+    }
+    const detail = item.result
+      ? resultHtml(item.result, item.traceId || state.traceId)
+      : item.status === "failed"
+        ? `<div class="invariant-warn">${escapeHtml(item.error || "Estimation failed.")}</div>`
+        : renderStatus(item.message);
+    html += `<details class="batch-item ${item.status}" data-index="${item.index}"${openItems.has(item.index) ? " open" : ""}>
+      <summary><span class="batch-index">#${item.index + 1}</span>
+        <span class="batch-title">${escapeHtml(item.title)}</span>
+        <span class="batch-meta">${escapeHtml(meta)}</span></summary>
+      <div class="batch-detail">${detail}</div>
+    </details>`;
+  }
+  html += `</div>`;
+  $("result-body").innerHTML = html;
+}
+
 function parseSSE(chunk) {
   let event = "message";
   const dataLines = [];
@@ -439,18 +627,21 @@ function renderStatus(msg) {
 }
 
 function renderResult(r) {
+  $("result-body").innerHTML = resultHtml(r, window.__trace_id);
+}
+
+function resultHtml(r, traceId = "") {
   // INVARIANT CHECK — refuse to show a number without its explanation.
   if (!invariantSatisfied(r)) {
     const reason = !r || r.ok === false
       ? (r && r.error ? r.error : "Backend did not certify this estimate.")
       : "Missing plain-language explanation.";
-    $("result-body").innerHTML = `
+    return `
       <div class="invariant-warn">
         ⚠ <strong>No estimate shown.</strong> ${escapeHtml(reason)}<br/>
         ResultCard refuses to render a point value without <code>plain_language_why</code> and <code>tldr</code>.
       </div>
       <details class="raw-toggle"><summary>raw payload</summary><pre>${escapeHtml(JSON.stringify(r, null, 2))}</pre></details>`;
-    return;
   }
 
   // Points hero
@@ -541,10 +732,10 @@ function renderResult(r) {
   }
 
   // Correlate this rendered estimate with its end-to-end Phoenix trace.
-  if (window.__trace_id) {
+  if (traceId) {
     const phoenixUrl = window.__observability && window.__observability.ui_url;
     html += `<div class="section"><h3>Observability</h3><div class="why">` +
-      `Trace <code>${escapeHtml(window.__trace_id)}</code>` +
+      `Trace <code>${escapeHtml(traceId)}</code>` +
       (phoenixUrl ? ` · <a href="${escapeHtml(phoenixUrl)}" target="_blank" rel="noopener">Open Phoenix monitoring ↗</a>` : "") +
       `</div></div>`;
   }
@@ -552,13 +743,13 @@ function renderResult(r) {
   // raw
   html += `<details class="raw-toggle"><summary>raw payload</summary><pre>${escapeHtml(JSON.stringify(r, null, 2))}</pre></details>`;
 
-  $("result-body").innerHTML = html;
+  return html;
 }
 
 function clearAll() {
   if (estimateController) estimateController.abort();
   ["m_title","m_desc","m_ac","m_ctx","j_issue"].forEach(id => $(id).value = "");
-  window.__jira_story = null; window.__sheet_stories = null;
+  window.__jira_story = null; window.__sheet_stories = null; window.__batch_state = null;
   window.__trace_id = null;
   $("jira_preview").innerHTML = ""; $("sheet_preview").innerHTML = "";
   $("err").textContent = "";

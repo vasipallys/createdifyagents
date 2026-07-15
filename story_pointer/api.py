@@ -21,11 +21,11 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .config import get_settings
-from .engine import StreamEvent, estimate, stream
+from .engine import StreamEvent, estimate, stream, stream_batch
 from .schema import StoryInput, StoryPointResult
 from .sources import jira as jira_source
 from .sources import spreadsheet as sheet_source
@@ -62,6 +62,10 @@ instrument_fastapi(app)
 # ---------------------------------------------------------------------------
 class EstimateRequest(BaseModel):
     story: StoryInput
+
+
+class BatchEstimateRequest(BaseModel):
+    stories: list[StoryInput] = Field(..., min_length=1)
 
 
 class JiraFetchRequest(BaseModel):
@@ -175,17 +179,14 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
 
 
 @app.post("/estimate/batch")
-async def estimate_batch(req: EstimateRequest) -> EventSourceResponse:
-    """Placeholder for batch estimation — streams one result per story.
-
-    For now this mirrors /estimate; a full batch endpoint would accept a list.
-    Kept here so the API surface is forward-compatible.
-    """
+async def estimate_batch(req: BatchEstimateRequest) -> EventSourceResponse:
+    """Estimate all supplied stories in one resilient SSE stream."""
     async def gen():
         try:
-            async for ev in stream(req.story):
+            async for ev in stream_batch(req.stories):
                 yield _sse(ev)
         except Exception as exc:  # noqa: BLE001
+            log.exception("batch estimate stream failed")
             yield _sse(StreamEvent("error", {"message": str(exc)}))
 
     return EventSourceResponse(gen())

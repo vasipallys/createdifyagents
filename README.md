@@ -327,6 +327,11 @@ so spreadsheets named *User Story*, *AC*, *Tech Notes*, etc. just work. No
 embeddings — pure string heuristics, which is the right tool for tabular
 backlogs. See [`story_pointer/sources/spreadsheet.py`](story_pointer/sources/spreadsheet.py).
 
+After upload, the browser submits **every parsed row** to one resilient batch
+SSE stream. Progress is updated item by item; a failed row does not stop later
+rows. Each completed title is expandable for the full estimate, evidence,
+risks, split guidance, raw payload, and Phoenix trace correlation.
+
 ---
 
 ## HTTP API
@@ -339,7 +344,7 @@ backlogs. See [`story_pointer/sources/spreadsheet.py`](story_pointer/sources/spr
 | `GET`  | `/config` | Active provider/model + configured Jira instances |
 | `POST` | `/estimate` | **SSE stream** of one estimation (`{ "story": {...} }`) |
 | `POST` | `/estimate/sync` | Non-streaming variant → `StoryPointResult` JSON |
-| `POST` | `/estimate/batch` | SSE stream (forward-compatible for batch) |
+| `POST` | `/estimate/batch` | Batch SSE stream (`{ "stories": [{...}, ...] }`); isolates per-item failures |
 | `GET`  | `/jira/instances` | List configured Jira instances |
 | `POST` | `/jira/fetch` | `{ "instance": "...", "issue": "PROJ-123" }` → `StoryInput` |
 | `POST` | `/upload` | Spreadsheet (`multipart/form-data`) → parsed stories |
@@ -363,6 +368,20 @@ data: {"message":"...","trace_id":"..."}
 
 The `result` event is emitted **exactly once**, and only after the invariant
 gate has certified the result (or marked it `ok=false` with `points=null`).
+
+### Batch SSE event format (`/estimate/batch`)
+
+```text
+batch_start
+item_start → item_status → item_chunk* → item_result | item_error
+...repeated sequentially for every submitted story...
+batch_complete
+```
+
+Every item event includes its zero-based `index`, `total`, and `title`.
+`item_result` carries the complete `StoryPointResult` and trace ID.
+`batch_complete` reports `total`, `succeeded`, and `failed`. Sequential provider
+calls avoid an unbounded request burst from large workbooks.
 
 ---
 
@@ -447,7 +466,10 @@ The suite (50+ tests, no network required — the LLM is mocked) covers:
 - **`test_engine.py`** — request builders for all four providers (OpenAI-compat
   shape vs Anthropic shape), response parsing (fence-stripping, prose
   extraction), end-to-end `stream()` with mocked provider (happy path, atomic
-  single-result, provider error, invariant violation)
+  single-result, provider error, invariant violation), plus all-row batch
+  completion and continue-after-item-error behavior
+- **`test_api_sse.py`** — single and batch SSE contracts plus browser POST
+  stream lifecycle, batch dispatch, progress, and drilldown hooks
 - **`test_telemetry.py`** — privacy-safe span attributes, token usage mapping,
   trace correlation, disabled mode, and public configuration redaction
 
@@ -473,7 +495,7 @@ createdifyagents/
 │   ├── llm.py                  # provider request builders + response parsers
 │   ├── engine.py               # graphon DSL load + GraphEngine.run + invariant gate
 │   ├── telemetry.py            # Phoenix OTLP setup + trace helpers
-│   ├── api.py                  # FastAPI app: /estimate (SSE), /jira, /upload
+│   ├── api.py                  # FastAPI app: single/batch SSE, /jira, /upload
 │   └── sources/
 │       ├── __init__.py
 │       ├── manual.py

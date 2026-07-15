@@ -469,7 +469,7 @@ Parsing requires a mapped title column or raises `ValueError` listing found colu
 - First tries `engine.run(start_inputs=start_inputs)` and yields its events.
 - On `TypeError`, falls back to `engine.run()`.
 
-**CURRENT BEHAVIOR — preserve this:** `/estimate`, `/estimate/sync`, and `/estimate/batch` call the Python `stream()`/`estimate()` paths. Those paths always call `_call_provider()` through HTTPX. They do not branch on `LLM_EXECUTION_MODE`, do not call `_load_graphon()`, and do not call `run_graphon_slim()`. `LLM_EXECUTION_MODE` is recorded as metadata and the two YAML graphs remain executable/reference artifacts. Do not silently wire Slim into the API when recreating this version.
+**CURRENT BEHAVIOR — preserve this:** `/estimate` and `/estimate/sync` call the Python `stream()`/`estimate()` paths; `/estimate/batch` calls `stream_batch()`, which wraps `stream()` once per story. Those paths always call `_call_provider()` through HTTPX. They do not branch on `LLM_EXECUTION_MODE`, do not call `_load_graphon()`, and do not call `run_graphon_slim()`. `LLM_EXECUTION_MODE` is recorded as metadata and the two YAML graphs remain executable/reference artifacts. Do not silently wire Slim into the API when recreating this version.
 
 ### 10.3 Synchronous-result async flow (`estimate`)
 
@@ -504,7 +504,22 @@ Signature: `async estimate(story, spec=None, progress=True) -> StoryPointResult`
 
 `stream()` converts errors to events rather than re-raising them after provider validation has passed.
 
-### 10.5 Provider HTTP call and telemetry
+### 10.5 Batch SSE async-generator flow (`stream_batch`)
+
+Signature: `async stream_batch(stories: list[StoryInput], spec=None) -> AsyncIterator[StreamEvent]`.
+
+1. Resolve settings/spec, validate the provider key once, and record total rows.
+2. Start parent OpenInference `CHAIN` span `story_pointer.estimate.batch` with transport, operation, total, execution mode, provider, and model attributes.
+3. Yield `batch_start {total, trace_id}` using the parent trace ID.
+4. Process stories sequentially to avoid an unbounded provider-request burst. Before each row yield `item_start {index,total,title}`.
+5. Iterate `stream(story, spec=spec)` under the parent context. Map `status`, `chunk`, `result`, and `error` to `item_status`, `item_chunk`, `item_result`, and `item_error`, merging zero-based index, total, and title into every item event.
+6. Count `item_result` as succeeded only when `result.ok` is true; a gated result with `ok=false` counts failed but remains available for drilldown. Provider/stream errors count failed.
+7. If an inner stream returns no result/error, emit `item_error` with `Estimation ended without a result.`. Catch unexpected row exceptions, log them, emit `item_error`, and continue later rows.
+8. Record succeeded/failed attributes, mark the batch transport span OK, and yield final `batch_complete {total,succeeded,failed,trace_id}`.
+
+Required ordering is one full item at a time. Exactly one terminal item event (`item_result` or `item_error`) is produced per row during normal execution, and one row failure MUST NOT terminate the batch.
+
+### 10.6 Provider HTTP call and telemetry
 
 `_call_provider(spec, story)`:
 
@@ -572,6 +587,11 @@ POST /estimate                         FastAPI server span
     └── story_pointer.invariant_gate   OpenInference CHAIN
 ```
 
+For `/estimate/batch`, `POST /estimate/batch` contains one
+`story_pointer.estimate.batch` CHAIN parent. Each row contributes its own
+`story_pointer.estimate.stream` subtree shown above, so Phoenix can drill from
+the workbook operation into an individual story, LLM call, normalize, and gate.
+
 ## 12. FastAPI application (`api.py`)
 
 ### 12.1 Initialization
@@ -581,7 +601,7 @@ POST /estimate                         FastAPI server span
 - FastAPI metadata: title `Story Pointer`, evidence-led description, version `0.1.0`.
 - Add permissive methods/headers CORS, credentials enabled, origins from settings.
 - Immediately configure telemetry and instrument app.
-- Request models: `EstimateRequest(story: StoryInput)` and `JiraFetchRequest(instance, issue)`.
+- Request models: `EstimateRequest(story: StoryInput)`, `BatchEstimateRequest(stories: list[StoryInput])` with Pydantic minimum length one, and `JiraFetchRequest(instance, issue)`.
 - `_sse(event)` returns sse-starlette dict `{event: event.type, data: json.dumps(event.data)}`.
 
 ### 12.2 Endpoint matrix
@@ -594,7 +614,7 @@ POST /estimate                         FastAPI server span
 | GET | `/config` | provider, model, execution mode, boolean key presence, Jira instance names, observability dict |
 | POST | `/estimate` | Body `EstimateRequest`; return `EventSourceResponse` over `stream(story)`; outer generator catches unexpected exceptions and emits `error` |
 | POST | `/estimate/sync` | Body `EstimateRequest`; return `StoryPointResult`; convert exception to HTTP 500 detail |
-| POST | `/estimate/batch` | CURRENT BEHAVIOR: same single-story request and stream as `/estimate`; it is only a forward-compatible placeholder |
+| POST | `/estimate/batch` | Body `BatchEstimateRequest`; stream all rows through `stream_batch`; outer generator logs/catches an unexpected batch failure and emits generic `error` |
 | GET | `/jira/instances` | Full `model_dump()` of configured instances, including credential fields. Preserve current behavior, though `/config` exposes names only |
 | POST | `/jira/fetch` | `{instance, issue}`; JiraError→400, other exceptions→logged 500 |
 | POST | `/upload` | Multipart `file`; read all bytes, parse; ValueError→400 detail, other parse errors→logged 400; return count and dumped stories |
@@ -689,6 +709,9 @@ CSS variables:
 - Inputs use secondary panel background and 6px radius; textarea is monospace and vertically resizable.
 - Buttons use blue accent; secondary buttons use panel color; disabled opacity is 0.4.
 - Status bar has a blue pulsing dot (1.4s).
+- Batch UI has a summary/progress bar and a bordered details list. Done and
+  failed rows use green/red borders and metadata; item detail reuses the full
+  result-card presentation with a smaller 38px points number.
 - Result hero uses 48px monospace points, person-days, right-aligned TL;DR.
 - Low/Medium/High use translucent green/amber/red badges.
 - Separate styles exist for split warning, invariant warning, two-column factor grid, lists, pills, split cards, raw details/pre, source tabs, and errors.
@@ -722,13 +745,13 @@ Source tabs use inline `switchSrc('manual'|'jira'|'sheet')`. Manual starts activ
 - If Jira names exist, hide empty message, show fields, and create option tags.
 - Config errors only `console.warn`.
 - `switchSrc()` toggles `active` on tab buttons by `data-src` and panels by `src-{name}`.
-- `currentStory()` for manual splits AC lines and trims bullet markers; for Jira returns `window.__jira_story` or null; for spreadsheet returns only the first uploaded story or null.
+- `currentStory()` for manual splits AC lines and trims bullet markers; for Jira returns `window.__jira_story` or null. Its spreadsheet fallback returns the first row, but `runEstimate()` detects spreadsheet mode first and always dispatches the complete `window.__sheet_stories` array through `runBatchEstimate()`.
 
 ### 15.5 Jira and upload browser flows
 
 `fetchJira()` clears errors, reads instance/key, returns on empty key, POSTs JSON to `/jira/fetch`, parses JSON, shows `detail` errors, stores result globally, and renders an escaped title pill. Network errors render as text.
 
-`uploadSheet()` clears errors, reads first file, returns when none, sends multipart field named `file`, parses JSON, shows detail errors, stores `r.stories || []`, and renders count plus at most five escaped title pills.
+`uploadSheet()` clears errors, reads first file, returns when none, sends multipart field named `file`, parses JSON, shows detail errors, stores `r.stories || []`, and renders the count with `all will be estimated` plus one escaped title pill for every parsed row.
 
 ### 15.6 POST SSE transport
 
@@ -754,11 +777,40 @@ Do not instantiate `EventSource`; it is GET-only. Maintain module-level `estimat
 
 `handleSSE(evt)` stores `evt.data.trace_id` globally when present; status replaces result with status UI; result calls `renderResult`. Chunk events intentionally have no visible renderer.
 
+Batch mode uses the same POST/ReadableStream/SSE parser and the same
+module-level `estimateController`:
+
+- `runBatchEstimate(stories)` requires a non-empty list, initializes
+  `window.__batch_state`, disables Estimate, and POSTs
+  `{stories}` to `/estimate/batch` with the same headers, content-type checks,
+  decoder framing, error extraction, abort rules, reader release, and guarded
+  button re-enable as the single flow.
+- Batch state contains total/succeeded/failed/complete/trace ID and one item per
+  original story with index, title, status, message, result, error, and trace ID.
+- A local event acceptor calls `handleBatchSSE`; top-level `error` throws and
+  `batch_complete` is the required terminal event. EOF without it throws
+  `The batch stream closed before all rows completed.`.
+- `handleBatchSSE` maps start/status/result/error events into per-item state.
+  A certified result is `done`; an invariant-redacted result or item error is
+  `failed`. It retains both batch and item trace correlation.
+- `renderBatchResults()` derives completed/success/failure counts from item
+  state, renders percentage progress, and renders **every** input row as native
+  `<details class="batch-item">`. Summary shows one-based display number,
+  escaped title, and live status or point/TL;DR. Expanded detail shows the full
+  result, a failure warning, or live status. The set of currently open rows is
+  preserved across SSE-driven rerenders.
+- Top-level stream errors remain visible above partial item results. Clearing
+  the UI also clears batch state.
+
 ### 15.7 Result rendering order
 
 All untrusted text MUST pass through `escapeHtml`, which replaces `& < > " '`; `prettyId` replaces underscores with spaces and title-cases word initials.
 
 If invariant fails, show no number. Prefer backend `error`, otherwise `Backend did not certify this estimate.` or `Missing plain-language explanation.` Include escaped raw payload in `<details>`.
+
+`renderResult(r)` writes `resultHtml(r, window.__trace_id)` to the main result
+body. `resultHtml(r, traceId)` returns the complete safe card markup without
+mutating the DOM, allowing the same renderer to power every batch drilldown.
 
 If certified, render in this order:
 
@@ -816,8 +868,14 @@ POST /jira/fetch -> resolve instance -> authenticated Jira GET
 ```text
 multipart POST /upload -> pandas reader by extension
 -> fuzzy header mapping -> row-wise StoryInput[]
--> browser displays up to five titles but estimates only stories[0]
--> same estimate flow
+-> browser displays every parsed title
+-> POST /estimate/batch with the complete StoryInput[]
+-> batch_start and progress UI
+-> sequential per-row stream() under one Phoenix batch trace
+-> item_start/status/chunk/result-or-error; failures do not stop later rows
+-> batch_complete totals
+-> one expandable row per input story
+-> full ResultCard + item trace drilldown inside each row
 ```
 
 ### 16.4 Error paths
@@ -886,7 +944,7 @@ Must cover valid result; every valid point; missing why; missing TL;DR; both mis
 
 ### 18.3 Provider/engine tests
 
-Must assert exact OpenAI/Groq/GLM/Claude URL/header/body shapes, provider extraction, HTTP errors, fenced/prose JSON parsing, happy SSE flow with mocked LLM, trace ID on first/final events, exactly one atomic result, provider error with no result, invariant violation with redacted points, and `StreamEvent.to_sse()` framing.
+Must assert exact OpenAI/Groq/GLM/Claude URL/header/body shapes, provider extraction, HTTP errors, fenced/prose JSON parsing, happy SSE flow with mocked LLM, trace ID on first/final events, exactly one atomic result, provider error with no result, invariant violation with redacted points, `StreamEvent.to_sse()` framing, successful all-row batch output, and continuation after a per-item provider error.
 
 ### 18.4 Source tests
 
@@ -894,13 +952,13 @@ Must assert exact and fuzzy spreadsheet mapping, missing title failure, CSV pars
 
 ### 18.5 API/frontend tests
 
-Must mock engine stream and assert named SSE status/result, content type, cache-control, no proxy buffering, result JSON, no `new EventSource`, guarded fetch/AbortController/status/content-type/try-catch-finally/premature-close logic, and safe observability configuration without API key.
+Must mock single and batch engine streams and assert named SSE status/result, two submitted rows produce two `item_result` events and `batch_complete`, content type, cache-control, no proxy buffering, result JSON, no `new EventSource`, guarded fetch/AbortController/status/content-type/try-catch-finally/premature-close logic, batch endpoint dispatch/progress/drilldown hooks, and safe observability configuration without API key.
 
 ### 18.6 Telemetry tests
 
 Must assert story attributes contain metadata but no story text/credentials, OpenAI and Anthropic token mapping, derived totals, 32-character trace ID, and public Phoenix status without keys/headers.
 
-Expected current result: **61 tests pass** with no network or live Phoenix requirement.
+Expected current result: **64 tests pass** with no network or live Phoenix requirement.
 
 ## 19. Module/file inventory
 
@@ -911,14 +969,14 @@ Expected current result: **61 tests pass** with no network or live Phoenix requi
 | `schema.py` | all input/result Pydantic models and helper methods |
 | `config.py` | literals, `ModelSpec`, `JiraInstance`, `Settings`, cache helpers |
 | `llm.py` | request builders, content extraction, JSON parser, result mapper, level/point coercion, `ProviderError` |
-| `engine.py` | event type, invariant, graph loaders, direct estimate/stream, provider call, usage mapping, Slim runner |
+| `engine.py` | event type, invariant, graph loaders, direct estimate/single+batch streams, provider call, usage mapping, Slim runner |
 | `telemetry.py` | Phoenix state/config, FastAPI/HTTPX instrumentation, tracer/status/story helpers |
 | `api.py` | app, request models, SSE helper, ten explicit routes, static mount |
 | `sources/manual.py` | `parse_manual` |
 | `sources/jira.py` | error, auth, fetch, ADF flatten, map, high-level get |
 | `sources/spreadsheet.py` | aliases, token/score/map, readers, parser, AC splitter |
 | `run.py` | URL readiness, CLI discovery, Phoenix start/stop, CLI main |
-| `static/index.html` | complete CSS, form/tabs, source fetches, POST SSE, result rendering, trace link |
+| `static/index.html` | complete CSS, form/tabs, source fetches, single/batch POST SSE, progress, result drilldown, trace links |
 | both DSL files | seven nodes and six linear edges each |
 | tests | all acceptance areas above |
 
@@ -932,14 +990,14 @@ Recreate these names so imports, monkeypatches, tests, and browser event handler
 - `schema.py`: `StoryInput`, `StoryBatch`, `FactorScore`, `DecidingDriver`, `AnchorCmp`, `PerLayerEffort`, `PersonDays`, `Risk`, `SplitSubStory`, `StoryPointResult`; StoryInput validator `_coerce_ac`; result methods `has_explanation`, `is_invariant_satisfied`, `redact_points`.
 - `config.py`: `ModelSpec`, `JiraInstance`, `Settings`; property `rest_root`; methods `_lower_provider`, `model_spec`, `jira_config`, `jira_instance`, `cors_origin_list`, `validate_provider_ready`; functions `get_settings`, `reset_settings_cache`.
 - `llm.py`: `build_request`, `_openai_request`, `_anthropic_request`, `extract_content`, `parse_json_payload`, `to_result`, `dict_to_result`, `_level`, `_points`, `ProviderError`.
-- `engine.py`: `StreamEvent`, `apply_invariant_gate`, `_load_graphon`, `GraphonUnavailable`, `_graphon_available`, `estimate`, `stream`, `_call_provider`, `_record_token_usage`, `run_graphon_slim`.
+- `engine.py`: `StreamEvent`, `apply_invariant_gate`, `_load_graphon`, `GraphonUnavailable`, `_graphon_available`, `estimate`, `stream`, `stream_batch`, `_call_provider`, `_record_token_usage`, `run_graphon_slim`.
 - `telemetry.py`: `TelemetryState`, `configure_telemetry`, `instrument_fastapi`, `telemetry_state`, `get_tracer`, `current_trace_id`, `set_error`, `set_ok`, `story_attributes`.
 - `sources/manual.py`: `parse_manual`.
 - `sources/jira.py`: `JiraError`, `auth_header`, `fetch_issue`, `_adf_to_text`, `map_issue_to_story`, `get_story`.
 - `sources/spreadsheet.py`: `_tokens`, `_score`, `map_columns`, `read_dataframe`, `parse`, `_split_ac`.
-- `api.py`: `EstimateRequest`, `JiraFetchRequest`, `_sse`, `health`, `telemetry_health`, `get_config`, `estimate_endpoint`, `estimate_sync_endpoint`, `jira_instances`, `jira_fetch`, `upload`, `estimate_batch`, `index`.
+- `api.py`: `EstimateRequest`, `BatchEstimateRequest`, `JiraFetchRequest`, `_sse`, `health`, `telemetry_health`, `get_config`, `estimate_endpoint`, `estimate_sync_endpoint`, `jira_instances`, `jira_fetch`, `upload`, `estimate_batch`, `index`.
 - `run.py`: `_url_available`, `_phoenix_executable`, `_start_phoenix`, `_stop_process`, `main`.
-- Browser JavaScript: `invariantSatisfied`, `$`, `switchSrc`, `loadConfig`, `currentStory`, `fetchJira`, `uploadSheet`, `runEstimate`, `parseSSE`, `responseError`, `handleSSE`, `renderStatus`, `renderResult`, `clearAll`, `escapeHtml`, `prettyId`; global mutable `estimateController`.
+- Browser JavaScript: `invariantSatisfied`, `$`, `switchSrc`, `loadConfig`, `currentStory`, `fetchJira`, `uploadSheet`, `runEstimate`, `runBatchEstimate`, `handleBatchSSE`, `renderBatchResults`, `parseSSE`, `responseError`, `handleSSE`, `renderStatus`, `renderResult`, `resultHtml`, `clearAll`, `escapeHtml`, `prettyId`; global mutable `estimateController` and `window.__batch_state`.
 
 ## 20. Recreation procedure
 
@@ -977,9 +1035,12 @@ GET http://127.0.0.1:8000/health -> 200 {status:ok}
 GET http://127.0.0.1:8000/health/telemetry -> configured when Phoenix enabled
 Phoenix UI -> http://127.0.0.1:6006
 POST /estimate -> text/event-stream with status/chunk/result or error
+POST /estimate/batch -> every submitted row reaches item_result/item_error, then batch_complete
 Certified result -> number + why + TL;DR + trace ID
-Phoenix trace -> exactly the six meaningful spans described above
-pytest -> 61 passed
+Spreadsheet UI -> all titles listed, live progress, expandable complete estimates
+Phoenix single trace -> exactly the meaningful spans described above
+Phoenix batch trace -> batch parent with one complete per-story subtree per row
+pytest -> 64 passed
 pip check -> no broken requirements
 ```
 
@@ -995,12 +1056,12 @@ d82a969242988fc781269b7f7f0aa33d1c17b928ef23aac561758486f512e54d  pyproject.toml
 28850ebb8f4bcde2204c0301b9016308aa334bef5b51f8e8626058611f53d98b  run.py
 7b6327113a92ff98c3eca9402f5770bf8ae8a3e15e3e41172f69e901dd40dc9d  dsl/graph_http.yml
 b6ee98a0fef41fb85200f512127700e483c970f159c38bba215c9ac2657fb871  dsl/graph_slim.yml
-6ab8e855195c16c3284bc2bbcf09187a28d3d112c70e37a962490e368d193d00  static/index.html
+5cb42512b9527d276b218d298a2e50be1f6834cef7ac615d376f702e8a3ce739  static/index.html
 f6e08fc9b8c605f15ccc7034d40c344dd90d4d6bf4cddde4b42bd3174991d75a  story_pointer/__init__.py
 17dde15103317e5e4e11de5d81bdc522e7bf6ea1f863b0cb331451099780f049  story_pointer/anchors.py
-ff02e3621543ea114662d853ce8586f9d065eedf6b87a0d626954c3b1fa22a10  story_pointer/api.py
+c8f19ab97ad9e407c5fe8b3f5254abc43ab6d92f6fd922299343f9faeebb9cca  story_pointer/api.py
 38758e39b5853fc76e7f2bf9b3e6264dd3998857a9bd48e43c2731ea7f959515  story_pointer/config.py
-2eec95af2622173ab3fd38deb0d15004955ecf490c52a0f4b95e562b57928bbb  story_pointer/engine.py
+b794ec804a61cc7509f3082581727bf901c65a4c7603a44e1cf8fd92ac435524  story_pointer/engine.py
 44d67c7990ed7c2817aaa4975b9bb683b15d4c22d59c36e648f94521e356ad63  story_pointer/llm.py
 7e1128aff931f72b10970892e20826357dcd23940f6d933811eeb19f76450b4c  story_pointer/schema.py
 c9c02ce1c16382bb6862371934d64f02222a7125d422c4494fb1c956f8d1a332  story_pointer/sources/__init__.py
@@ -1010,8 +1071,8 @@ c9c02ce1c16382bb6862371934d64f02222a7125d422c4494fb1c956f8d1a332  story_pointer/
 583b7f5c1cc37263552fdb3b2da94e6b72c9b304926f198088d81cb06c65cdcf  story_pointer/telemetry.py
 7e9af23c4d8769e855436c950c52874ef9d5ac0c36f24531913b3ca965d6860f  tests/__init__.py
 4da1428431f3966f14fface2490d3227a79112a04f1ba83d28609b27e0cd49d8  tests/conftest.py
-6c45817dc8e1aa52bb2dec8ab2dd1b65570c2ea70806189f6c1f98e1b9fbdb81  tests/test_api_sse.py
-a7da6c703e7639f5afe5e05de368a4266e6745d91c3308c4d90175c891641776  tests/test_engine.py
+de0bcc24360e958e6564f5b0806a30ff6ae3b38426493b1b5f1d10d69ebb27cd  tests/test_api_sse.py
+f523b27e35690bc01e06d02083c7f70843fa2c71c212fca0b619f75cb849af50  tests/test_engine.py
 bb0e5137768298277d62d8470fbd9055f03a86ef017ff475e31bd60530ba6d89  tests/test_invariant.py
 f34aa667f65ce40912136ceecc423fdd24582e241de4243feeb0b740d308a4d8  tests/test_schema.py
 83b48b30e9eab72fc4354f2359292aca966eff543aa25198f0e5b02fd823dae1  tests/test_sources.py
@@ -1031,14 +1092,15 @@ f34aa667f65ce40912136ceecc423fdd24582e241de4243feeb0b740d308a4d8  tests/test_sch
 - [ ] All provider wire formats and response paths exist.
 - [ ] Manual, Jira, CSV, XLS, XLSX flows exist.
 - [ ] Direct Python runtime versus dormant Slim dispatch is preserved.
-- [ ] Sync, SSE, placeholder batch, and every error path exist.
+- [ ] Sync, single SSE, resilient all-row batch SSE, and every error path exist.
 - [ ] Backend and frontend invariants both exist.
-- [ ] Abort-safe POST SSE parser handles LF/CRLF and premature close.
+- [ ] Abort-safe single/batch POST SSE parser handles LF/CRLF and premature close.
+- [ ] Spreadsheet upload estimates every row and renders expandable full detail.
 - [ ] Phoenix spans, token usage, trace ID, privacy default, and UI link exist.
 - [ ] FastAPI SSE send/receive spans are suppressed.
 - [ ] Local Phoenix ownership/start/stop semantics exist.
 - [ ] Both seven-node DSL graphs exist with exact linear topology.
 - [ ] All 17 banking fixtures and both reference documents exist.
-- [ ] All 61 tests pass.
+- [ ] All 64 tests pass.
 
 If every checklist item and acceptance check passes, the complete current code and operational flow have been recreated.

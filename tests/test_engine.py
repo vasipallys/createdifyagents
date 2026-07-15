@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from story_pointer.config import ModelSpec, reset_settings_cache
-from story_pointer.engine import StreamEvent, apply_invariant_gate, stream
+from story_pointer.engine import StreamEvent, apply_invariant_gate, stream, stream_batch
 from story_pointer.llm import build_request, extract_content, parse_json_payload
 from story_pointer.schema import StoryInput
 
@@ -233,6 +233,59 @@ async def test_stream_invariant_violation_redacts_points(monkeypatch):
     assert result["ok"] is False
     assert result["points"] is None
     assert result["error"]
+
+
+@pytest.mark.asyncio
+async def test_stream_batch_estimates_every_story(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    reset_settings_cache()
+    monkeypatch.setattr(
+        "story_pointer.engine._call_provider",
+        AsyncMock(return_value=GOOD_RESPONSE_JSON),
+    )
+
+    stories = [StoryInput(title="First"), StoryInput(title="Second")]
+    events = [event async for event in stream_batch(stories)]
+
+    assert events[0].type == "batch_start"
+    assert [e.data["index"] for e in events if e.type == "item_start"] == [0, 1]
+    results = [e for e in events if e.type == "item_result"]
+    assert [e.data["title"] for e in results] == ["First", "Second"]
+    assert all(e.data["result"]["points"] == 3 for e in results)
+    assert events[-1].type == "batch_complete"
+    assert events[-1].data == {
+        "total": 2,
+        "succeeded": 2,
+        "failed": 0,
+        "trace_id": events[-1].data["trace_id"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_stream_batch_continues_after_item_error(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    reset_settings_cache()
+    from story_pointer.llm import ProviderError
+
+    async def fake_call(spec, story):
+        if story.title == "Broken":
+            raise ProviderError("HTTP 503")
+        return GOOD_RESPONSE_JSON
+
+    monkeypatch.setattr("story_pointer.engine._call_provider", fake_call)
+    events = [
+        event
+        async for event in stream_batch(
+            [StoryInput(title="Broken"), StoryInput(title="Still runs")]
+        )
+    ]
+
+    assert [e.data["index"] for e in events if e.type == "item_error"] == [0]
+    assert [e.data["index"] for e in events if e.type == "item_result"] == [1]
+    assert events[-1].data["succeeded"] == 1
+    assert events[-1].data["failed"] == 1
 
 
 def test_stream_event_to_sse_format():
