@@ -193,14 +193,27 @@ async def estimate_batch(req: BatchEstimateRequest) -> EventSourceResponse:
 
 
 # ---------------------------------------------------------------------------
-# Static frontend
+# DSL editor API (graphon DSL CRUD + validation)
+# ---------------------------------------------------------------------------
+from .dsl_api import router as dsl_router  # noqa: E402
+
+app.include_router(dsl_router)
+
+
+# ---------------------------------------------------------------------------
+# Static frontend + React DSL editor
 # ---------------------------------------------------------------------------
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# Production build of the React DSL editor (editor/dist). Served at /editor.
+EDITOR_DIR = Path(__file__).resolve().parent.parent / "editor" / "dist"
+if EDITOR_DIR.exists():
+    app.mount("/editor", StaticFiles(directory=str(EDITOR_DIR), html=True), name="editor")
 
-@app.get("/")
-async def index() -> FileResponse:
+
+@app.get("/", response_model=None)
+async def index() -> FileResponse | JSONResponse:
     idx = STATIC_DIR / "index.html"
     if not idx.exists():
         return JSONResponse(
@@ -208,6 +221,20 @@ async def index() -> FileResponse:
             status_code=404,
         )
     return FileResponse(str(idx), media_type="text/html")
+
+
+@app.get("/api/config")
+async def api_config() -> dict[str, Any]:
+    """Lightweight config for the editor (mirrors /config, CORS-friendly)."""
+    s = get_settings()
+    spec = s.model_spec()
+    return {
+        "provider": spec.provider,
+        "model": spec.model,
+        "execution_mode": s.llm_execution_mode,
+        "has_api_key": bool(spec.api_key),
+        "editor_available": EDITOR_DIR.exists(),
+    }
 
 
 __all__ = ["app"]
