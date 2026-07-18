@@ -43,10 +43,14 @@ app = FastAPI(
 )
 
 settings = get_settings()
+settings.validate_production_ready()
+cors_origins = settings.cors_origin_list()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origin_list(),
-    allow_credentials=True,
+    allow_origins=cors_origins,
+    # Browsers forbid credentialed wildcard CORS. Development remains easy,
+    # while an explicit production allowlist may opt into credentials.
+    allow_credentials=cors_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -136,7 +140,8 @@ async def estimate_sync_endpoint(req: EstimateRequest) -> StoryPointResult:
     try:
         return await estimate(req.story)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc))
+        log.exception("synchronous estimate failed")
+        raise HTTPException(status_code=502, detail="Estimation provider request failed") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +150,14 @@ async def estimate_sync_endpoint(req: EstimateRequest) -> StoryPointResult:
 @app.get("/jira/instances")
 async def jira_instances() -> dict[str, Any]:
     s = get_settings()
-    return {"instances": [i.model_dump() for i in s.jira_config()]}
+    # Never serialize Jira credentials to a browser. The source adapter keeps
+    # the complete typed instances server-side.
+    return {
+        "instances": [
+            {"name": i.name, "version": i.version, "auth_type": i.auth_type}
+            for i in s.jira_config()
+        ]
+    }
 
 
 @app.post("/jira/fetch", response_model=StoryInput)
@@ -156,7 +168,7 @@ async def jira_fetch(req: JiraFetchRequest) -> StoryInput:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
         log.exception("jira fetch failed")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=502, detail="Jira request failed") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +176,15 @@ async def jira_fetch(req: JiraFetchRequest) -> StoryInput:
 # ---------------------------------------------------------------------------
 @app.post("/upload")
 async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
-    content = await file.read()
+    limit = get_settings().max_upload_bytes
+    chunks: list[bytes] = []
+    total = 0
+    while chunk := await file.read(min(1024 * 1024, limit + 1 - total)):
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(status_code=413, detail=f"Upload exceeds {limit} bytes")
+        chunks.append(chunk)
+    content = b"".join(chunks)
     try:
         batch = sheet_source.parse(content, file.filename or "upload.csv")
     except ValueError as exc:
@@ -181,6 +201,9 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
 @app.post("/estimate/batch")
 async def estimate_batch(req: BatchEstimateRequest) -> EventSourceResponse:
     """Estimate all supplied stories in one resilient SSE stream."""
+    limit = get_settings().max_batch_size
+    if len(req.stories) > limit:
+        raise HTTPException(status_code=413, detail=f"Batch exceeds {limit} stories")
     async def gen():
         try:
             async for ev in stream_batch(req.stories):

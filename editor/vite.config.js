@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react'
 // Dev server proxies API calls to the FastAPI backend (default :8000).
 // The production build is a static bundle the backend serves at /editor.
 export default defineConfig({
+  base: '/editor/',
   plugins: [react()],
   server: {
     port: 5173,

@@ -104,6 +104,20 @@ def test_frontend_uses_one_guarded_post_stream():
     assert "stream closed before returning a result" in stream_code
 
 
+def test_batch_result_layout_keeps_titles_readable():
+    """Long result summaries must not squeeze titles into vertical text."""
+    html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert ".batch-item summary { display: grid" in html
+    assert "grid-template-columns: 18px 40px minmax(190px,0.9fr)" in html
+    assert ".batch-title { min-width: 0" in html
+    assert "overflow-wrap: break-word" in html
+    assert 'class="batch-result-chip"' in html
+    assert 'class="batch-result-summary"' in html
+    assert 'role="progressbar"' in html
+    assert 'class="story-chip-list"' in html
+
+
 def test_config_exposes_safe_observability_status():
     with TestClient(api_module.app) as client:
         response = client.get("/config")

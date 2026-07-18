@@ -3,7 +3,6 @@ import ReactFlow, {
   Background,
   Controls,
   MiniMap,
-  addEdge,
   ReactFlowProvider,
   useReactFlow,
 } from 'reactflow'
@@ -24,7 +23,7 @@ function CanvasInner() {
   const deleteNode = useStore((s) => s.deleteNode)
 
   const wrapperRef = useRef(null)
-  const { project } = useReactFlow()
+  const { screenToFlowPosition } = useReactFlow()
 
   // drag-drop from the palette
   const onDragOver = useCallback((e) => {
@@ -37,14 +36,10 @@ function CanvasInner() {
       e.preventDefault()
       const type = e.dataTransfer.getData('application/reactflow')
       if (!type) return
-      const bounds = wrapperRef.current.getBoundingClientRect()
-      const position = project({
-        x: e.clientX - bounds.left,
-        y: e.clientY - bounds.top,
-      })
+      const position = screenToFlowPosition({ x: e.clientX, y: e.clientY })
       addNode(type, position)
     },
-    [addNode, project],
+    [addNode, screenToFlowPosition],
   )
 
   const handleConnect = useCallback(
@@ -68,7 +63,7 @@ function CanvasInner() {
         onDragOver={onDragOver}
         fitView
         deleteKeyCode={null}
-        onNodesDelete={(ids) => ids.forEach((id) => deleteNode(id))}
+        onNodesDelete={(nodes) => nodes.forEach((node) => deleteNode(node.id))}
       >
         <Background color="#2d3b50" gap={20} />
         <Controls />

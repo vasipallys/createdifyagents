@@ -14,6 +14,7 @@ export default function Toolbar() {
   const exportYaml = useStore((s) => s.exportYaml)
   const dirty = useStore((s) => s.dirty)
   const currentFile = useStore((s) => s.currentFile)
+  const currentRevision = useStore((s) => s.currentRevision)
   const markSaved = useStore((s) => s.markSaved)
   const setValidation = useStore((s) => s.setValidation)
   const validation = useStore((s) => s.validation)
@@ -69,7 +70,7 @@ export default function Toolbar() {
     setBusy(true)
     try {
       const res = await getDslFile(name)
-      importDsl(res.dsl, name)
+      importDsl(res.dsl, name, res.revision)
       setShowList(false)
     } catch (e) { alert(`load failed: ${e.message}`) }
     finally { setBusy(false) }
@@ -83,8 +84,18 @@ export default function Toolbar() {
     }
     setBusy(true)
     try {
-      await saveDslFile(name, exportYaml())
-      markSaved(name)
+      const dsl = exportYaml()
+      let res
+      try {
+        res = await saveDslFile(name, dsl, currentRevision)
+      } catch (error) {
+        if (!/DSL write API key/i.test(error.message)) throw error
+        const key = prompt('Enter the DSL write API key for this browser session:')
+        if (!key) throw error
+        sessionStorage.setItem('story-pointer-dsl-key', key)
+        res = await saveDslFile(name, dsl, currentRevision)
+      }
+      markSaved(name, res.revision)
       setValidation({ status: 'idle', message: '', loadable: null })
     } catch (e) { alert(`save failed: ${e.message}`) }
     finally { setBusy(false) }

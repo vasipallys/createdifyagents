@@ -85,12 +85,6 @@ HOST=127.0.0.1
 PORT=8000
 # Comma-separated list of allowed CORS origins. "*" allows all.
 CORS_ORIGINS=*
-ENVIRONMENT=development
-MAX_UPLOAD_BYTES=10485760
-MAX_BATCH_SIZE=100
-MAX_DSL_BYTES=1048576
-# Required for DSL save operations in production. Send as X-DSL-API-Key.
-DSL_WRITE_API_KEY=
 
 # ----------------------------------------------------------------------------
 # 7. OpenTelemetry / Arize Phoenix monitoring

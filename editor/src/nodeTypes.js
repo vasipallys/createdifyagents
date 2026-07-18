@@ -218,16 +218,34 @@ export function defaultDataFor(type) {
   if (!spec) throw new Error(`Unknown node type: ${type}`)
   const data = { type, title: spec.label }
   for (const f of spec.fields) {
-    if (f.key.includes('.')) continue // nested handled at serialize-time
+    const value = (f.kind === 'list' || f.kind === 'kvlist' || f.kind === 'variables' ||
+      f.kind === 'grouplist' || f.kind === 'caselist' || f.kind === 'paramlist' ||
+      f.kind === 'promptlist')
+      ? (f.default ? structuredClone(f.default) : [])
+      : (f.default ?? '')
+    if (f.key.includes('.')) {
+      setNested(data, f.key, value)
+      continue
+    }
     if (f.kind === 'list' || f.kind === 'kvlist' || f.kind === 'variables' ||
         f.kind === 'grouplist' || f.kind === 'caselist' || f.kind === 'paramlist' ||
         f.kind === 'promptlist') {
-      data[f.key] = f.default ? structuredClone(f.default) : []
+      data[f.key] = value
     } else {
-      data[f.key] = f.default ?? ''
+      data[f.key] = value
     }
   }
   return data
+}
+
+function setNested(target, dotted, value) {
+  const parts = dotted.split('.')
+  let cursor = target
+  for (const part of parts.slice(0, -1)) {
+    cursor[part] = cursor[part] && typeof cursor[part] === 'object' ? cursor[part] : {}
+    cursor = cursor[part]
+  }
+  cursor[parts.at(-1)] = value
 }
 
 export function makeId(type) {

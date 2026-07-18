@@ -23,7 +23,7 @@ function setPath(obj, dotted, value) {
   return clone
 }
 
-export default function Inspector() {
+export default function Inspector({ open = false, onClose }) {
   const flow = useStore((s) => s.flow)
   const selectedId = useStore((s) => s.selectedId)
   const updateNodeData = useStore((s) => s.updateNodeData)
@@ -33,8 +33,11 @@ export default function Inspector() {
 
   if (!node) {
     return (
-      <aside className="inspector">
-        <h3>Inspector</h3>
+      <aside id="node-inspector" className={`inspector ${open ? 'open' : ''}`}>
+        <div className="insp-head">
+          <h3>Inspector</h3>
+          <button type="button" className="inspector-close" onClick={onClose}>Close</button>
+        </div>
         <div className="empty">Select a node to edit its fields.</div>
       </aside>
     )
@@ -53,10 +56,13 @@ export default function Inspector() {
   }
 
   return (
-    <aside className="inspector">
+    <aside id="node-inspector" className={`inspector ${open ? 'open' : ''}`}>
       <div className="insp-head">
         <h3>{spec?.label || type}</h3>
-        <span className="node-id-badge">{node.id}</span>
+        <div className="insp-meta">
+          <span className="node-id-badge">{node.id}</span>
+          <button type="button" className="inspector-close" onClick={onClose}>Close</button>
+        </div>
       </div>
       <p className="insp-desc">{spec?.description}</p>
 

@@ -114,9 +114,14 @@ class Settings(BaseSettings):
     jira_instances: str = ""
 
     # --- Server ---
+    environment: Literal["development", "test", "production"] = "development"
     host: str = "127.0.0.1"
     port: int = 8000
     cors_origins: str = "*"
+    max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1, le=100 * 1024 * 1024)
+    max_batch_size: int = Field(default=100, ge=1, le=1000)
+    max_dsl_bytes: int = Field(default=1024 * 1024, ge=1, le=10 * 1024 * 1024)
+    dsl_write_api_key: str = ""
 
     # --- OpenTelemetry / Arize Phoenix ---
     phoenix_enabled: bool = True
@@ -197,6 +202,15 @@ class Settings(BaseSettings):
                 f"LLM_PROVIDER='{self.llm_provider}' but its API key is not set. "
                 f"Set the corresponding *_API_KEY in your environment."
             )
+
+    def validate_production_ready(self) -> None:
+        """Reject unsafe server defaults when explicitly running production."""
+        if self.environment != "production":
+            return
+        if self.cors_origins.strip() == "*":
+            raise RuntimeError("CORS_ORIGINS must be an explicit allowlist in production")
+        if not self.dsl_write_api_key:
+            raise RuntimeError("DSL_WRITE_API_KEY must be configured in production")
 
 
 # ---------------------------------------------------------------------------

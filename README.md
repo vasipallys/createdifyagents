@@ -1,538 +1,551 @@
-# 🎯 Story Pointer
+# Story Pointer
 
-**An evidence-led story-point estimator for React/Spring delivery teams in regulated (banking) environments.**
+Story Pointer is an evidence-led story-point estimator for software delivery teams, with extra attention to regulated banking work. It accepts stories entered manually, fetched from Jira, or uploaded from a spreadsheet. An LLM evaluates the story against a fixed 12-factor rubric and six calibration anchors, then returns a modified-Fibonacci estimate with supporting evidence.
 
-Story Pointer never asks an LLM to "guess a number." Instead it runs a checkpointed **graphon** pipeline (the Dify DSL graph execution engine) that:
+The repository also contains a React-based visual editor for graphon/Dify-style YAML workflow files.
 
-1. **Scores 12 delivery factors** (Low / Medium / High, each *with evidence*),
-2. **Identifies the 2–3 deciding drivers**,
-3. **Compares the story against six fixed calibration anchors** (no embeddings, no vector store, no retrieval — anchors are injected verbatim into the prompt),
-4. **Only then concludes** a modified-Fibonacci point value (1, 2, 3, 5, 8, 13),
-5. **Writes** a product-owner explanation, TL;DR, per-layer effort, person-day range,
-6. **Detects hidden work** implied by the acceptance criteria,
-7. **Assesses** top-3 risks, assumptions, and spike need,
-8. **Recommends a split** (a 13 is *always* split, with sized sub-stories).
+## What the application does
 
-> ### Core product invariant
-> **A point value is never shown without its explanation.** The backend emits the
-> final result atomically *only after* `plain_language_why` and `tldr` exist; the
-> frontend `ResultCard` independently *refuses to render a number* without them.
-> This double enforcement is the trust model.
+For each story, Story Pointer asks the configured model to produce:
 
----
+- a point value from `1, 2, 3, 5, 8, 13`;
+- Low/Medium/High scores with evidence for 12 delivery factors;
+- the deciding drivers and closest calibration anchors;
+- a plain-language explanation and short summary;
+- frontend, backend, data, test, and integration effort levels;
+- a person-day range;
+- hidden work, risks, assumptions, and spike guidance;
+- a recommended split when the story is too large.
 
-## Table of contents
+The central safety rule is: **a point value is never displayed without an explanation**. The backend redacts the point value when the model does not return both `plain_language_why` and `tldr`, and the estimator UI checks the same rule before rendering the number. A 13-point response must also contain at least two valid sub-stories of 8 points or fewer.
 
-- [How it works](#how-it-works)
-- [The 12 factors](#the-12-factors)
-- [The 6 calibration anchors](#the-6-calibration-anchors)
-- [Architecture](#architecture)
-- [Quick start](#quick-start)
-- [Configuration](#configuration)
-- [Phoenix end-to-end monitoring](#phoenix-end-to-end-monitoring)
-- [LLM providers](#llm-providers)
-- [Story sources](#story-sources)
-- [HTTP API](#http-api)
-- [The DSL (graphon)](#the-dsl-graphon)
-- [The invariant, explained](#the-invariant-explained)
-- [Testing](#testing)
-- [Project layout](#project-layout)
-- [Notes for regulated environments](#notes-for-regulated-environments)
+## Applications in this repository
 
----
+| Application | URL | Purpose |
+|---|---|---|
+| Estimator UI | `http://127.0.0.1:8000/` | Enter, fetch, upload, and estimate stories |
+| Swagger API docs | `http://127.0.0.1:8000/docs` | Explore and call the FastAPI endpoints |
+| DSL editor, production build | `http://127.0.0.1:8000/editor/` | Visually edit YAML graphs after building `editor/dist` |
+| DSL editor, development server | `http://127.0.0.1:5173/` | Run the React editor with Vite hot reload |
+| Phoenix | `http://127.0.0.1:6006/` | Inspect OpenTelemetry traces when enabled |
 
-## How it works
+## Requirements
 
-```
-                         ┌──────────────────────────────────────────────┐
-   story (manual/jira/   │  start                                        │
-   spreadsheet) ───────► │   └► build_prompt  (rubric + 6 anchors + ACs) │
-                         │       └► estimate   (LLM call, structured)    │
-                         │           └► normalize (parse provider JSON)  │
-                         │               └► GATE  ◄── THE INVARIANT      │
-                         │                   └► render → answer         │
-                         └──────────────────────────────────────────────┘
-                                          │
-                          SSE stream ─────┴────►  browser ResultCard
-                          (status / chunk /        (refuses points w/o
-                           result / error)          explanation)
-```
-
-The pipeline is defined as a real graphon graph (`dsl/graph_http.yml` and
-`dsl/graph_slim.yml`). `graphon.dsl.loads()` parses the DSL, `GraphEngine.run()`
-executes it, and the backend forwards the typed events to the browser as
-Server-Sent Events.
-
-The estimation itself is a **single coherent structured LLM call**: the model is
-forced to produce factor scores → drivers → anchor comparison → *then* the
-conclusion, all in one JSON object. It never emits a bare number.
-
----
-
-## The 12 factors
-
-Every story is scored on all twelve, each at Low / Medium / High with a
-one-line evidence note grounded *only* in the supplied story text.
-
-| # | Factor | What it measures |
-|---|--------|------------------|
-| 1 | `requirements_clarity` | How well-specified/stable are the ACs? |
-| 2 | `technical_complexity` | Algorithmic / logic difficulty |
-| 3 | `integration_surface` | Number & risk of systems touched |
-| 4 | `data_model_change` | Schema / migration / backfill impact |
-| 5 | `frontend_effort` | React UI build-out |
-| 6 | `backend_effort` | Spring service build-out |
-| 7 | `test_effort` | Unit / integration / contract test scope |
-| 8 | `regulatory_compliance` | Banking/regulatory controls (audit, PII, consent) |
-| 9 | `security_review` | Authn/authz, secrets, input validation |
-| 10 | `observability_ops` | Logging, metrics, alerts, runbooks |
-| 11 | `cross_team_dependency` | Dependency on other teams/APIs/platforms |
-| 12 | `reversibility` | Cost/risk to roll back in production |
-
-The full Low/Medium/High rubric text for each factor lives in
-[`story_pointer/anchors.py`](story_pointer/anchors.py) and is injected into the
-estimation prompt verbatim.
-
----
-
-## The 6 calibration anchors
-
-Anchors are **fixed reference stories** on the modified-Fibonacci scale. They
-are **not** retrieved (no embeddings, no vector DB). They are injected verbatim
-into every prompt so the model can map the target story to a known magnitude.
-
-| Points | Anchor | ~Person-days |
-|-------:|--------|-------------:|
-| 1 | Trivial tweak (one-line/config/CSS) | 0.5 |
-| 2 | Small, well-understood (field + validation + test) | 1 |
-| 3 | Standard small feature (read endpoint + small UI) | 2–3 |
-| 5 | Moderate feature (business rules + migration + integration tests) | 4–6 |
-| 8 | Large feature (new bounded context, contract tests, flag rollout) | 7–10 |
-| 13 | **TOO BIG — must split** (spans contexts, hard migration, high risk) | 11–15 |
-
-A `13` is never a final estimate. The gate always converts a 13 into a split of
-2–3 sized sub-stories each ≤ 8.
-
----
-
-## Architecture
-
-| Layer | Tech |
-|-------|------|
-| Graph execution | **[graphon](https://github.com/langgenius/graphon)** — `graphon.dsl.loads()` → `GraphEngine.run()` |
-| DSL | Dify-style YAML: `start → template-transform → http-request\|llm → code → code (gate) → answer` |
-| Backend | **FastAPI** + **sse-starlette** (Server-Sent Events) |
-| Provider calls | **httpx** (async) — groq / openai / glm / claude |
-| Config | **pydantic-settings** (`.env`) |
-| Sources | Manual (pydantic), **Jira** (Cloud v3 + Server/DC v2, multi-instance), **Spreadsheet** (CSV/XLS/XLSX, pandas, fuzzy column mapping) |
-| Frontend | Single-page **HTML/CSS/JS** (no build step) |
-| Observability | **OpenTelemetry + Arize Phoenix** — FastAPI, SSE workflow, HTTPX, LLM, normalize, and gate spans |
-
-### Two execution modes
-
-`LLM_EXECUTION_MODE` selects which DSL graph runs:
-
-| Mode | Graph | LLM node | Requirements |
-|------|-------|----------|--------------|
-| `http` *(default)* | `dsl/graph_http.yml` | `http-request` | **Zero external binaries** — works anywhere. Calls any OpenAI-compatible or Anthropic endpoint. |
-| `slim` | `dsl/graph_slim.yml` | `llm` (native graphon) | Requires the `dify-plugin-daemon-slim` binary + Dify marketplace plugins. Gives token-level streaming + structured-output parsing from `SlimLLM`. |
-
-Both modes share the **same invariant gate** and the same canonical result
-model — the gate is independent of how the model was reached.
-
----
+- Python 3.11 or newer
+- One API key for OpenAI, Groq, Anthropic, or GLM
+- Node.js and npm only if you want to build or develop the visual DSL editor
+- Network access to the selected LLM provider
+- Optional: access to Jira Cloud or Jira Server/Data Center
 
 ## Quick start
 
+### Windows PowerShell
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+Copy-Item .env.example .env
+```
+
+If PowerShell blocks activation, either run the environment's Python directly or allow scripts for the current shell:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
+### macOS or Linux
+
 ```bash
-# 1. Clone & enter
-git clone <this-repo> createdifyagents
-cd createdifyagents
-
-# 2. Create a virtualenv (Python 3.11+)
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-
-# 3. Install
-pip install -e ".[dev]"
-
-# 4. Configure — copy the example and set ONE provider key
+python3.11 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
 cp .env.example .env
-#   then edit .env:
-#     LLM_PROVIDER=openai            # groq | openai | claude | glm
-#     OPENAI_API_KEY=sk-...          # the key for your chosen provider
-
-# 5. Run the Phoenix collector/UI and API together
-python run.py --with-phoenix
-#   app     -> http://127.0.0.1:8000
-#   Phoenix -> http://127.0.0.1:6006
 ```
 
-Open the app in your browser, paste a story, hit **Estimate**, and watch the
-SSE stream + evidence-led result render.
+Open `.env`, select one provider, and set its key. For example:
 
----
-
-## Configuration
-
-All config is environment-driven (`.env`). See [`.env.example`](.env.example)
-for the full reference. The essentials:
-
-```ini
-# Provider + execution mode
-LLM_PROVIDER=openai                 # groq | openai | claude | glm
-LLM_EXECUTION_MODE=http             # http (default) | slim
-LLM_TEMPERATURE=0.2
-LLM_MAX_TOKENS=2400
-LLM_RATE_LIMIT_WAIT_SECONDS=15      # minimum async hold after HTTP 429
-LLM_RATE_LIMIT_MAX_RETRIES=3        # 0 disables retry
-
-# Exactly one provider block needs a key (matching LLM_PROVIDER):
-GROQ_API_KEY=
-OPENAI_API_KEY=
-ANTHROPIC_API_KEY=
-GLM_API_KEY=
-
-# Jira (multi-instance, JSON array) — optional
-JIRA_INSTANCES=[{"name":"prod","base_url":"https://x.atlassian.net","version":"v3","auth_type":"pat","email":"po@x.com","token":"ATATT..."}]
-
-# Server
-HOST=127.0.0.1
-PORT=8000
-CORS_ORIGINS=*
-
-# Phoenix / OpenTelemetry
-PHOENIX_ENABLED=true
-PHOENIX_COLLECTOR_ENDPOINT=http://127.0.0.1:6006/v1/traces
-PHOENIX_UI_URL=http://127.0.0.1:6006
-PHOENIX_PROJECT_NAME=story-pointer
-PHOENIX_CAPTURE_CONTENT=false
+```dotenv
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your-key-here
 ```
 
-Model names default to sensible values per provider and can be overridden
-(`OPENAI_MODEL`, `GROQ_MODEL`, `CLAUDE_MODEL`, `GLM_MODEL`).
+For a basic run without local trace collection, also set:
 
-On HTTP 429, the app prefers the longest delay from `Retry-After`, Groq rate
-reset headers, the provider's `Please try again in 13.78s` message, and
-`LLM_RATE_LIMIT_WAIT_SECONDS`. SSE clients receive a live `rate_limit` status
-before the asynchronous hold. Once retries are exhausted, that row becomes an
-`item_error`; later spreadsheet rows still run.
-
----
-
-## Phoenix end-to-end monitoring
-
-[Arize Phoenix](https://github.com/Arize-ai/phoenix) is installed with the
-project and receives OpenTelemetry traces over OTLP/HTTP. The trace hierarchy
-for an SSE estimate is:
-
-```text
-POST /estimate                         FastAPI server span
-└── story_pointer.estimate.stream      OpenInference CHAIN
-    ├── story_pointer.llm.call         OpenInference LLM
-    │   └── HTTP POST                  instrumented HTTPX client span
-    ├── story_pointer.normalize        OpenInference CHAIN
-    └── story_pointer.invariant_gate   OpenInference CHAIN
+```dotenv
+PHOENIX_ENABLED=false
 ```
 
-The LLM span records provider, model, invocation parameters, response status,
-latency, and token counts when the provider returns usage. Workflow spans also
-record story-source metadata, SSE chunk count, final point value, and success
-or failure. The browser displays the trace ID next to the result and links to
-the Phoenix dashboard.
-
-Start both services with one command:
+Start the API and estimator UI:
 
 ```bash
-python run.py --with-phoenix
-```
-
-Or run them in separate terminals:
-
-```bash
-phoenix serve
 python run.py
 ```
 
-Use `GET /health/telemetry` to confirm exporter configuration. `configured`
-means the exporter is installed and initialized; the Phoenix process must also
-be reachable at `PHOENIX_UI_URL` to receive traces.
+Open `http://127.0.0.1:8000/`. Stop the server with `Ctrl+C`.
 
-Story text, prompts, and model responses are **not exported by default**. Set
-`PHOENIX_CAPTURE_CONTENT=true` only in an approved environment. API keys and
-authorization headers are never added to custom spans.
+### Run with Phoenix monitoring
 
-For a remote or authenticated Phoenix deployment, point
-`PHOENIX_COLLECTOR_ENDPOINT` at its full `/v1/traces` endpoint and set
-`PHOENIX_API_KEY`. Do not use `--with-phoenix` for a remote collector.
+The Python dependencies include Phoenix. To start Phoenix first and stop it when the API exits:
 
----
-
-## LLM providers
-
-Story Pointer supports four providers, all configured from the environment:
-
-| Provider | `LLM_PROVIDER` | Wire format | Key var | Default model |
-|----------|----------------|-------------|---------|---------------|
-| **Groq** | `groq` | OpenAI-compatible (`/chat/completions`) | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
-| **OpenAI** | `openai` | OpenAI (`/chat/completions`) | `OPENAI_API_KEY` | `gpt-4o-mini` |
-| **Claude** | `claude` | Anthropic (`/v1/messages`) | `ANTHROPIC_API_KEY` | `claude-3-5-sonnet-20241022` |
-| **GLM (Zhipu)** | `glm` | OpenAI-compatible (`/chat/completions`) | `GLM_API_KEY` | `glm-4-flash` |
-
-Request building and response parsing are in [`story_pointer/llm.py`](story_pointer/llm.py):
-groq/openai/glm share the OpenAI-compatible builder; claude has its own
-Anthropic-shape builder. JSON-mode (`response_format: json_object`) is requested
-for the OpenAI-compatible providers.
-
----
-
-## Story sources
-
-Stories arrive from three places. All three resolve to the same
-[`StoryInput`](story_pointer/schema.py) shape.
-
-### 1. Manual entry
-Form fields in the UI → validated `StoryInput`.
-
-### 2. Jira (multi-instance)
-Configure one or more Jira instances via `JIRA_INSTANCES`:
-
-```json
-[
-  {
-    "name": "prod",
-    "base_url": "https://acme.atlassian.net",
-    "version": "v3",
-    "auth_type": "pat",
-    "email": "po@acme.com",
-    "token": "ATATT3xFfGF0..."
-  },
-  {
-    "name": "dc",
-    "base_url": "https://jira.acme.internal",
-    "version": "v2",
-    "auth_type": "basic",
-    "username": "svc-account",
-    "password": "svc-token"
-  }
-]
+```bash
+python run.py --with-phoenix
 ```
 
-- `version: "v3"` → **Jira Cloud** REST API v3 (`/rest/api/v3`)
-- `version: "v2"` → **Jira Server / Data Center** REST API v2 (`/rest/api/v2`)
-- `auth_type: "pat"` → Cloud PAT (Basic `email:token`, or Bearer)
-- `auth_type: "basic"` → Server/DC HTTP Basic (`username:password`)
+This requires `PHOENIX_ENABLED=true`. The command waits for Phoenix to become ready, starts the API, and stores local Phoenix data under `.phoenix/` by default.
 
-The issue's ADF description is flattened to text; acceptance criteria are pulled
-from a custom AC field (if present) or from Gherkin-ish lines (`Given/When/Then`,
-bulleted, numbered) in the description. See
-[`story_pointer/sources/jira.py`](story_pointer/sources/jira.py).
+Other server options are:
 
-### 3. Spreadsheet upload (CSV / XLS / XLSX)
-Drag a backlog export into the UI. Columns are **fuzzy-mapped** to
-`title / description / acceptance_criteria / context` via token-overlap scoring,
-so spreadsheets named *User Story*, *AC*, *Tech Notes*, etc. just work. No
-embeddings — pure string heuristics, which is the right tool for tabular
-backlogs. See [`story_pointer/sources/spreadsheet.py`](story_pointer/sources/spreadsheet.py).
+```bash
+python run.py --reload
+python run.py --host 0.0.0.0 --port 9000
+python run.py --with-phoenix --reload
+```
 
-After upload, the browser submits **every parsed row** to one resilient batch
-SSE stream. Progress is updated item by item; a failed row does not stop later
-rows. Each completed title is expandable for the full estimate, evidence,
-risks, split guidance, raw payload, and Phoenix trace correlation.
+Use `--reload` for backend development only. Binding to `0.0.0.0` exposes the service to other machines; read the security notes before doing that.
 
----
+## Build and run the DSL editor
+
+The estimator UI is already a static file and needs no frontend build. The visual DSL editor is a separate React/Vite project.
+
+### Production-style build served by FastAPI
+
+Build the editor before starting the Python server:
+
+```bash
+cd editor
+npm ci
+npm run build
+cd ..
+python run.py
+```
+
+Then open `http://127.0.0.1:8000/editor/`. If the API was already running while you built the editor, restart it because the `/editor` mount is decided when the application starts.
+
+### Editor development with hot reload
+
+Run the backend in one terminal:
+
+```bash
+python run.py --reload
+```
+
+Run Vite in another terminal:
+
+```bash
+cd editor
+npm ci
+npm run dev
+```
+
+Open `http://127.0.0.1:5173/`. Vite proxies `/api` and `/dsl` requests to `http://127.0.0.1:8000`.
+
+## How to use the estimator
+
+### Manual story
+
+1. Open the estimator UI.
+2. Keep the **Manual** tab selected.
+3. Enter a title. Description, acceptance criteria, and context are optional but improve the evidence available to the model.
+4. Put one acceptance criterion on each line.
+5. Select **Estimate**.
+6. Review the explanation, factors, effort, risks, assumptions, and any split recommendation.
+
+The title is the only required input. The request fails validation when it is empty.
+
+### Jira story
+
+1. Configure `JIRA_INSTANCES` in `.env` and restart the API.
+2. Open the **Jira** tab.
+3. Choose an instance and enter an issue key such as `PAY-123`.
+4. Select **Fetch story** and review the title preview.
+5. Select **Estimate**.
+
+The Jira mapper:
+
+- adds the issue key to the title;
+- flattens Jira Cloud Atlassian Document Format descriptions into text;
+- looks for an acceptance-criteria custom field first;
+- otherwise detects Given/When/Then-style lines in the description;
+- adds status, labels, and components to the story context.
+
+### Spreadsheet backlog
+
+1. Open the **Spreadsheet** tab.
+2. Upload a `.csv`, `.xls`, or `.xlsx` file.
+3. Confirm the number of parsed stories.
+4. Select **Estimate**.
+
+All parsed rows are sent through one sequential SSE batch. A failed row is reported separately and does not stop later rows.
+
+The spreadsheet must have a recognizable title column. Column names are mapped with string heuristics:
+
+| Story field | Common accepted headers |
+|---|---|
+| `title` | Title, Story, User Story, Summary, Name, Subject, Ticket |
+| `description` | Description, Desc, Details, Narrative, Body |
+| `acceptance_criteria` | Acceptance Criteria, Acceptance, AC, DoD, Criteria, Given When Then |
+| `context` | Context, Notes, Comments, Tech Notes, Tags, Labels, Links |
+
+Rows without a title are skipped. Acceptance criteria are split on line breaks, numbered markers, bullets, semicolons, and pipe separators.
+
+## How to use the visual DSL editor
+
+The editor reads and writes `.yml` workflow files in the repository's `dsl/` directory.
+
+1. Drag a node from the left palette onto the canvas.
+2. Connect node handles to create graph edges.
+3. Select a node and edit its fields in the inspector.
+4. Use **Validate** to send the generated YAML to `/dsl/validate`.
+5. Use **Save** to write the graph into `dsl/`, **Export** to download it, or **Import** to load a local YAML file.
+6. Use **Open** to load an existing file from `dsl/`.
+
+Supported palette groups include:
+
+- lifecycle: Start, End, Answer;
+- logic: Code, If/Else, Template Transform, Variable Aggregator, Assigner, List Operator;
+- LLM and tools: LLM, Question Classifier, Parameter Extractor, Tool, HTTP Request.
+
+Saved filenames may contain letters, numbers, underscores, and hyphens and must end in `.yml` or `.yaml`. The editor stores node positions in `__pos`, preserves unknown document/graph/node/edge metadata, and uses revision checks so a stale tab cannot silently overwrite a newer server file. If `DSL_WRITE_API_KEY` is configured, the first save prompts for it and retains it only for the browser session.
+
+Validation uses `graphon.dsl.inspect()` when graphon can be imported. If graphon is unavailable, it falls back to a basic YAML shape check; the response includes a note when this fallback is used.
+
+## Configuration reference
+
+Configuration is loaded from environment variables and from `.env` in the repository root. Settings are cached when the Python process starts, so restart the API after editing `.env`.
+
+### Provider and generation settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LLM_PROVIDER` | `openai` | `openai`, `groq`, `claude`, or `glm` |
+| `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI model ID |
+| `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model ID |
+| `CLAUDE_MODEL` | `claude-3-5-sonnet-20241022` | Anthropic model ID |
+| `GLM_MODEL` | `glm-4-flash` | GLM model ID |
+| `LLM_TEMPERATURE` | `0.2` | Sampling temperature sent to the model |
+| `LLM_MAX_TOKENS` | `2400` | Maximum generated tokens |
+| `LLM_RATE_LIMIT_WAIT_SECONDS` | `15` | Minimum asynchronous wait after HTTP 429 |
+| `LLM_RATE_LIMIT_MAX_RETRIES` | `3` | Number of retries; `0` disables retries |
+
+Only the key matching `LLM_PROVIDER` is required:
+
+| Provider | Key variable | Base URL variable |
+|---|---|---|
+| OpenAI | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| Groq | `GROQ_API_KEY` | `GROQ_BASE_URL` |
+| Anthropic | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
+| GLM | `GLM_API_KEY` | `GLM_BASE_URL` |
+
+OpenAI-compatible providers receive a JSON response-format request. Anthropic uses its native `/v1/messages` request and response format. `OPENAI_ORGANIZATION` and `ANTHROPIC_API_VERSION` are also supported.
+
+When a provider returns HTTP 429, Story Pointer uses the longest available delay from the configured minimum, `Retry-After`, provider rate-reset headers, or a recognizable "try again in" message. The wait is asynchronous, so other requests can continue.
+
+### Server settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HOST` | `127.0.0.1` | Bind address |
+| `PORT` | `8000` | API port |
+| `CORS_ORIGINS` | `*` | `*` or a comma-separated allowlist |
+| `ENVIRONMENT` | `development` | `development`, `test`, or `production`; production rejects wildcard CORS and a missing DSL key |
+| `MAX_UPLOAD_BYTES` | `10485760` | Spreadsheet upload limit |
+| `MAX_BATCH_SIZE` | `100` | Stories allowed in one batch |
+| `MAX_DSL_BYTES` | `1048576` | DSL read/validate/save limit |
+| `DSL_WRITE_API_KEY` | empty | Required in production; authorizes editor saves through `X-DSL-API-Key` |
+
+### Jira settings
+
+`JIRA_INSTANCES` is a JSON array stored on one `.env` line. Jira Cloud v3 example:
+
+```dotenv
+JIRA_INSTANCES=[{"name":"prod","base_url":"https://acme.atlassian.net","version":"v3","auth_type":"pat","email":"po@acme.com","token":"your-api-token"}]
+```
+
+Jira Server/Data Center v2 example:
+
+```dotenv
+JIRA_INSTANCES=[{"name":"internal","base_url":"https://jira.acme.internal","version":"v2","auth_type":"basic","username":"service-user","password":"your-token-or-password"}]
+```
+
+For Cloud `pat` authentication, an entry with `email` uses HTTP Basic with `email:token`; without `email`, it uses a Bearer token. For Server/Data Center `basic` authentication, it uses `username:password`.
+
+### Phoenix/OpenTelemetry settings
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PHOENIX_ENABLED` | `true` | Configure telemetry export |
+| `PHOENIX_COLLECTOR_ENDPOINT` | `http://127.0.0.1:6006/v1/traces` | OTLP/HTTP trace endpoint |
+| `PHOENIX_UI_URL` | `http://127.0.0.1:6006` | Link shown in the estimator UI |
+| `PHOENIX_PROJECT_NAME` | `story-pointer` | Phoenix project name |
+| `PHOENIX_API_KEY` | empty | Key for authenticated Phoenix deployments |
+| `PHOENIX_BATCH` | `true` | Use batched span export |
+| `PHOENIX_CAPTURE_CONTENT` | `false` | Export story text, prompt, and model output |
+| `PHOENIX_WORKING_DIR` | `.phoenix` | Local Phoenix storage |
+
+Content capture is off by default. Metadata such as provider, model, source, token counts, response status, result status, and trace IDs can still be exported. Leave content capture off unless sending story data to the trace collector is approved.
 
 ## HTTP API
 
 | Method | Path | Description |
-|--------|------|-------------|
-| `GET`  | `/` | The single-page frontend |
-| `GET`  | `/health` | Liveness (`{"status":"ok"}`) |
-| `GET`  | `/health/telemetry` | Phoenix/OpenTelemetry exporter status (no credentials) |
-| `GET`  | `/config` | Active provider/model + configured Jira instances |
-| `POST` | `/estimate` | **SSE stream** of one estimation (`{ "story": {...} }`) |
-| `POST` | `/estimate/sync` | Non-streaming variant → `StoryPointResult` JSON |
-| `POST` | `/estimate/batch` | Batch SSE stream (`{ "stories": [{...}, ...] }`); isolates per-item failures |
-| `GET`  | `/jira/instances` | List configured Jira instances |
-| `POST` | `/jira/fetch` | `{ "instance": "...", "issue": "PROJ-123" }` → `StoryInput` |
-| `POST` | `/upload` | Spreadsheet (`multipart/form-data`) → parsed stories |
-| `GET`  | `/docs` | Interactive OpenAPI / Swagger UI |
+|---|---|---|
+| `GET` | `/` | Estimator UI |
+| `GET` | `/health` | Liveness check |
+| `GET` | `/health/telemetry` | Public telemetry configuration status |
+| `GET` | `/config` | Active provider/model, key presence, Jira instance names, observability status |
+| `POST` | `/estimate` | Estimate one story as an SSE stream |
+| `POST` | `/estimate/sync` | Estimate one story and return JSON |
+| `POST` | `/estimate/batch` | Estimate multiple stories as a sequential SSE stream |
+| `POST` | `/upload` | Parse an uploaded spreadsheet |
+| `GET` | `/jira/instances` | Return safe Jira name/version/auth summaries (never credentials) |
+| `POST` | `/jira/fetch` | Fetch and normalize a Jira issue |
+| `GET` | `/dsl/list` | List server-side YAML graphs |
+| `GET` | `/dsl/file?name=...` | Read one YAML graph |
+| `POST` | `/dsl/save` | Validate and atomically save one YAML graph with key/revision checks |
+| `POST` | `/dsl/validate` | Validate graph YAML |
+| `GET` | `/api/config` | Lightweight editor configuration |
+| `GET` | `/docs` | Swagger UI |
 
-### SSE event format (`/estimate`)
+### Input shape
 
+```json
+{
+  "story": {
+    "title": "Add transaction dispute workflow",
+    "description": "Allow a customer to dispute a posted transaction.",
+    "acceptance_criteria": [
+      "Given a posted transaction, the customer can open a dispute",
+      "A case is created and an audit event is recorded"
+    ],
+    "context": "React UI, Spring API, regulated banking environment",
+    "source": "manual"
+  }
+}
 ```
-event: status
-data: {"node":"start","message":"Pipeline started.","trace_id":"..."}
 
-event: chunk
-data: {"text":"...raw model text in ~120-char chunks..."}
+`acceptance_criteria` may also be a newline-separated string; Pydantic converts it to a list.
 
-event: result
-data: {"result": { ...full StoryPointResult, emitted ATOMICALLY after the gate... }, "trace_id":"..."}
+### Synchronous API example
 
-event: error
-data: {"message":"...","trace_id":"..."}
+PowerShell:
+
+```powershell
+$body = @{
+  story = @{
+    title = "Add transaction dispute workflow"
+    description = "Allow a customer to dispute a posted transaction."
+    acceptance_criteria = @("Create a case", "Record an audit event")
+    source = "manual"
+  }
+} | ConvertTo-Json -Depth 5
+
+Invoke-RestMethod `
+  -Uri http://127.0.0.1:8000/estimate/sync `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $body
 ```
 
-The `result` event is emitted **exactly once**, and only after the invariant
-gate has certified the result (or marked it `ok=false` with `points=null`).
+macOS/Linux:
 
-### Batch SSE event format (`/estimate/batch`)
+```bash
+curl -sS http://127.0.0.1:8000/estimate/sync \
+  -H 'Content-Type: application/json' \
+  -d '{"story":{"title":"Add transaction dispute workflow","description":"Allow a customer to dispute a posted transaction.","acceptance_criteria":["Create a case","Record an audit event"],"source":"manual"}}'
+```
+
+### Streaming API events
+
+`POST /estimate` emits named Server-Sent Events:
+
+```text
+status -> status -> chunk* -> status -> status -> result
+```
+
+- `status` reports the pipeline stage and rate-limit waits;
+- `chunk` contains approximately 120 characters of the completed model response, not provider token streaming;
+- `result` is emitted once after normalization and the invariant gate;
+- `error` reports provider or pipeline failure.
+
+`POST /estimate/batch` emits:
 
 ```text
 batch_start
-item_start → item_status → item_chunk* → item_result | item_error
-...repeated sequentially for every submitted story...
+item_start -> item_status* -> item_chunk* -> item_result | item_error
+...one sequence per story...
 batch_complete
 ```
 
-Every item event includes its zero-based `index`, `total`, and `title`.
-`item_result` carries the complete `StoryPointResult` and trace ID.
-`batch_complete` reports `total`, `succeeded`, and `failed`. Sequential provider
-calls avoid an unbounded request burst from large workbooks.
+The batch is intentionally sequential to avoid an uncontrolled burst of provider requests.
 
----
+### Result shape
 
-## The DSL (graphon)
+The JSON result contains these major fields:
 
-Both graphs live in [`dsl/`](dsl/) and implement the same logical pipeline:
-
-```
-start → build_prompt (template-transform)
-      → estimate      (http-request | llm)
-      → normalize     (code — extract JSON from provider response)
-      → gate          (code — THE INVARIANT)
-      → render        (template-transform)
-      → answer
+```text
+ok, title, points, plain_language_why, tldr
+factors[], deciding_drivers[], closest_anchors[]
+per_layer_effort, person_days
+hidden_work[], risks[], assumptions[]
+spike_needed, spike_reason
+must_split, recommended_split[]
+error, model, provider
 ```
 
-### `dsl/graph_http.yml` — default, zero-binary
-Uses `http-request` nodes to POST to the provider. The provider URL/headers/body
-are supplied via the `start` node variables by the Python engine, so the same
-graph works for all four providers. **No Slim binary, no plugins required.**
+Treat `ok=false` or `points=null` as no certified estimate. Do not display a cached or inferred point value in that case.
 
-### `dsl/graph_slim.yml` — native graphon LLM
-Uses graphon's native `llm` node (Slim-backed). Gives token-level streaming and
-structured-output parsing from `SlimLLM`. Requires:
-- `graphon` installed
-- `dify-plugin-daemon-slim` binary on `PATH` (or `SLIM_BINARY_PATH`)
-- matching `model_credentials` (provider plugin from the Dify marketplace)
-- `LLM_EXECUTION_MODE=slim`
+## Estimation pipeline and current DSL status
 
-You can verify a graph loads without running it:
+The production request path currently runs this Python pipeline:
 
-```python
-from graphon.dsl import inspect
-plan = inspect(open("dsl/graph_http.yml").read())
-print(plan.loadable)   # True
+```text
+StoryInput
+  -> build rubric/anchor prompt
+  -> direct HTTP call to selected provider
+  -> extract and normalize model JSON
+  -> apply invariant gate
+  -> return JSON or SSE result
 ```
 
----
+The prompt and anchors are assembled in `story_pointer/anchors.py`. Provider request/response formats are handled in `story_pointer/llm.py`. Retries, telemetry, normalization, batching, and the invariant gate are in `story_pointer/engine.py`.
 
-## The invariant, explained
+The `dsl/graph_http.yml` and `dsl/graph_slim.yml` files describe equivalent graph-style workflows and are available in the visual editor. The repository also contains `run_graphon_slim()`, which can load `graph_slim.yml` and iterate graphon events.
 
-> **A point value is never shown without its explanation.**
+**Current limitation:** `/estimate`, `/estimate/sync`, and `/estimate/batch` do not call `run_graphon_slim()` or execute either YAML graph. They always use the direct HTTP provider path. `LLM_EXECUTION_MODE` is accepted, exposed in configuration, and added to telemetry, but changing it does not currently change estimation execution. The Slim settings in `.env.example` are therefore preparatory until that runner is connected to the API/engine flow.
 
-This is enforced in **two independent places**, so a bug in one cannot leak a
-bare number:
+Editing or saving a DSL file also does not automatically change estimator behavior. Use the editor for designing, round-tripping, and validating graph files, not as a live estimator workflow switch.
 
-1. **Backend gate** — [`apply_invariant_gate()`](story_pointer/engine.py) in
-   `story_pointer/engine.py`. Before any result leaves the engine:
-   - if `plain_language_why` or `tldr` is empty → `ok=false`, `points=null`,
-     and an error is set;
-   - if `points` is not in `{1,2,3,5,8,13}` → same;
-   - if `points == 13` → `must_split=true`; a split of ≥ 2 sub-stories each ≤ 8
-     is required, otherwise `points` is redacted;
-   - person-day ranges are sanity-clamped.
+## The 12 scoring factors
 
-2. **Frontend `ResultCard`** — [`static/index.html`](static/index.html) contains
-   an `invariantSatisfied(r)` check. If it returns false, the card renders a
-   warning instead of the number — even if the backend somehow sent one.
+1. Requirements clarity
+2. Technical complexity
+3. Integration surface
+4. Data model change
+5. Frontend effort
+6. Backend effort
+7. Test effort
+8. Regulatory compliance
+9. Security review
+10. Observability and operations
+11. Cross-team dependency
+12. Reversibility
 
-The final `result` SSE event is emitted **atomically** — there is no partial
-state where a number is visible without its explanation.
+Every prompt includes Low/Medium/High guidance for each factor. It also includes fixed 1, 2, 3, 5, 8, and 13-point calibration stories. These anchors are injected directly into the prompt; there is no embedding model or vector database.
 
-The test suite proves every failure mode (see
-[`tests/test_invariant.py`](tests/test_invariant.py)).
+## Testing and verification
 
----
-
-## Testing
+Install development dependencies and run the backend suite:
 
 ```bash
-python -m pytest -v
+python -m pytest -q
 ```
 
-The suite (50+ tests, no network required — the LLM is mocked) covers:
+Tests disable Phoenix export and mock LLM calls, so they do not require a real provider key or a running collector. They cover schemas and prompt construction, provider request formats, response parsing, rate-limit retries, SSE contracts, batch isolation, Jira mapping, spreadsheet parsing, telemetry privacy, and the point/explanation invariant.
 
-- **`test_schema.py`** — 12 factors, 6 anchors, prompt assembly, model helpers
-- **`test_invariant.py`** — every gate failure mode: missing why, missing tldr,
-  invalid points, null points, 13-without-split, 13-with-bad-split, person-day
-  swap, provider parsing → gate handoff
-- **`test_sources.py`** — Jira ADF mapping, auth headers (Cloud PAT + Server
-  basic), spreadsheet fuzzy column mapping, CSV + XLSX parsing
-- **`test_engine.py`** — request builders for all four providers (OpenAI-compat
-  shape vs Anthropic shape), response parsing (fence-stripping, prose
-  extraction), end-to-end `stream()` with mocked provider (happy path, atomic
-  single-result, provider error, invariant violation), plus all-row batch
-  completion and continue-after-item-error behavior
-- **`test_api_sse.py`** — single and batch SSE contracts plus browser POST
-  stream lifecycle, batch dispatch, progress, and drilldown hooks
-- **`test_telemetry.py`** — privacy-safe span attributes, token usage mapping,
-  trace correlation, disabled mode, and public configuration redaction
+Build the React editor to verify its production bundle:
 
----
+```bash
+cd editor
+npm ci
+npm test
+npm run build
+```
+
+Useful runtime checks:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/config
+curl http://127.0.0.1:8000/health/telemetry
+```
 
 ## Project layout
 
-```
-createdifyagents/
-├── README.md
-├── pyproject.toml
-├── requirements.txt
-├── .env.example
-├── run.py                      # uvicorn entrypoint
-├── dsl/
-│   ├── graph_http.yml          # default DSL (http-request, zero-binary)
-│   └── graph_slim.yml          # native graphon llm (Slim-backed)
-├── story_pointer/
-│   ├── __init__.py
-│   ├── config.py               # pydantic-settings; provider/model/keys from env
-│   ├── anchors.py              # 12 factors + 6 calibration anchors + prompts
-│   ├── schema.py               # StoryInput, StoryPointResult, sub-models
-│   ├── llm.py                  # provider request builders + response parsers
-│   ├── engine.py               # graphon DSL load + GraphEngine.run + invariant gate
-│   ├── telemetry.py            # Phoenix OTLP setup + trace helpers
-│   ├── api.py                  # FastAPI app: single/batch SSE, /jira, /upload
-│   └── sources/
-│       ├── __init__.py
-│       ├── manual.py
-│       ├── jira.py             # multi-instance Cloud v3 + Server/DC v2
-│       └── spreadsheet.py      # CSV/XLS/XLSX fuzzy column mapping
-├── static/
-│   └── index.html              # single-page UI; ResultCard invariant
-└── tests/
-    ├── test_schema.py
-    ├── test_invariant.py
-    ├── test_sources.py
-    └── test_engine.py
+```text
+.
+|-- run.py                         Python/uvicorn entry point
+|-- pyproject.toml                 Package metadata and dependencies
+|-- requirements.txt               Runtime dependency alternative
+|-- .env.example                   Configuration template
+|-- story_pointer/
+|   |-- api.py                     FastAPI routes and static mounts
+|   |-- config.py                  Environment settings and provider selection
+|   |-- anchors.py                 Rubric, anchors, and prompt assembly
+|   |-- llm.py                     Provider request builders and response parsing
+|   |-- engine.py                  Calls, retries, SSE, batching, gate, telemetry
+|   |-- schema.py                  Pydantic input/result contracts
+|   |-- dsl_api.py                 DSL file CRUD and validation routes
+|   |-- telemetry.py               Phoenix/OpenTelemetry configuration
+|   `-- sources/
+|       |-- jira.py                Jira fetch and normalization
+|       |-- spreadsheet.py         CSV/XLS/XLSX parsing and column mapping
+|       `-- manual.py              Manual input normalization
+|-- static/index.html              No-build estimator UI
+|-- editor/                        React/Vite visual DSL editor
+|-- dsl/
+|   |-- graph_http.yml             HTTP-request workflow definition
+|   `-- graph_slim.yml             Slim LLM workflow definition
+`-- tests/                         Backend regression tests
 ```
 
----
+The large Markdown and CSV files in the repository are supporting architecture and domain-reference materials; they are not loaded by the running application.
 
-## Notes for regulated environments
+## Security and operational notes
 
-- **Deterministic calibration.** Anchors are fixed strings injected verbatim —
-  no retrieval, no embeddings, no vector store. The same story + provider +
-  temperature yields the same factor scores and the same anchor comparison.
-- **Auditable pipeline.** The graph is a YAML file you can read, diff, and
-  review. Every estimation runs the same `start → build_prompt → estimate →
-  normalize → gate → answer` path.
-- **No silent numbers.** The invariant means every estimate a stakeholder sees
-  is accompanied by a plain-language explanation and a one-line TL;DR — enforced
-  at the backend *and* the frontend.
-- **Forced splits.** A 13 can never ship as a 13; the gate requires a sized
-  decomposition before any number is surfaced.
-- **Bring your own model.** Choose the provider that matches your data-residency
-  and procurement constraints (groq, openai, claude, glm). Self-hostable
-  OpenAI-compatible endpoints work via `OPENAI_BASE_URL` / `GLM_BASE_URL`.
+- Keep `.env` out of source control. It may contain provider keys, Jira tokens, and Phoenix credentials.
+- The estimator API does not define end-user identity. Run it on `127.0.0.1` or behind an authenticated gateway with rate and cost controls.
+- `/dsl/save` validates, size-limits, atomically replaces, revision-checks, and can API-key-protect repository DSL files. Use identity-based RBAC and durable version history for a multi-user deployment.
+- `/jira/instances` returns only safe name/version/auth-type summaries; credentials remain server-side.
+- `CORS_ORIGINS=*` is development-only and non-credentialed. `ENVIRONMENT=production` refuses to start until an explicit allowlist and `DSL_WRITE_API_KEY` are configured.
+- Uploaded spreadsheets are size-limited by `MAX_UPLOAD_BYTES` and parsed in memory. Keep a stricter proxy limit for untrusted public traffic.
+- LLM provider calls include the full story prompt. Do not submit regulated or personal data unless the selected provider and deployment are approved for it.
+- Keep `PHOENIX_CAPTURE_CONTENT=false` unless trace content capture is explicitly approved.
+- Estimates are decision support, not a substitute for team refinement, security review, compliance review, or delivery commitments.
+
+### Production container
+
+The multi-stage `Dockerfile` runs editor tests/build in Node, installs the Python application into a slim runtime, runs as a non-root user, and includes a liveness health check. Production mode intentionally refuses unsafe defaults, so provide at least an explicit CORS origin, a DSL write key, and the selected provider key:
+
+```bash
+docker build -t story-pointer .
+docker run --rm -p 8000:8000 \
+  -e CORS_ORIGINS=https://story-pointer.example \
+  -e DSL_WRITE_API_KEY=replace-with-a-secret \
+  -e OPENAI_API_KEY=replace-with-a-secret \
+  story-pointer
+```
+
+Mount `/app/dsl` on durable storage if editor saves must survive container replacement. Keep TLS, identity-based access control, request limits, and SSE proxy buffering/timeout configuration at the ingress or authenticated gateway.
+
+## Troubleshooting
+
+### The UI says no API key
+
+Confirm `LLM_PROVIDER` matches the key you set, then restart the API. Check `GET /config`; `has_api_key` should be `true`.
+
+### Phoenix connection errors appear
+
+Start with `python run.py --with-phoenix`, start `phoenix serve` separately, point the collector variables at a reachable remote Phoenix instance, or set `PHOENIX_ENABLED=false`.
+
+### `/editor/` returns 404
+
+Run `npm ci` and `npm run build` inside `editor/`, then restart the Python server. The expected directory is `editor/dist/`.
+
+### The editor opens but cannot list or save files
+
+In Vite development mode, ensure FastAPI is running on port 8000. In a production build, serve the editor through the same FastAPI application. Verify that the process can write to `dsl/`; when a DSL key is configured, enter it in the save prompt. A revision-conflict error means another tab/process changed the file—reopen it before saving.
+
+### Spreadsheet upload cannot find a title
+
+Rename one column to `Title`, `Story`, `User Story`, or `Summary`. Only the first worksheet read by pandas is used.
+
+### Jira fetch fails
+
+Check the instance name, REST version, base URL, credentials, issue permissions, and issue key. Use `v3` for Jira Cloud and `v2` for Server/Data Center. Configuration changes require a server restart.
+
+### A result has no point value
+
+This is intentional when the provider response fails the invariant gate. Inspect `error`, `plain_language_why`, `tldr`, and `recommended_split`. Improve the story detail or retry; do not infer a point value from the raw model text.

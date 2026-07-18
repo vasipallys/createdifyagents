@@ -15,13 +15,20 @@ export async function getDslFile(name) {
   return r.json() // { name, dsl, meta }
 }
 
-export async function saveDslFile(name, dsl) {
+export async function saveDslFile(name, dsl, revision = null) {
+  const writeKey = sessionStorage.getItem('story-pointer-dsl-key') || ''
   const r = await fetch(`${BASE}/dsl/save`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, dsl }),
+    headers: {
+      'Content-Type': 'application/json',
+      ...(writeKey ? { 'X-DSL-API-Key': writeKey } : {}),
+    },
+    body: JSON.stringify({ name, dsl, revision }),
   })
-  if (!r.ok) throw new Error(`save failed: ${r.status}`)
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}))
+    throw new Error(body.detail || `save failed: ${r.status}`)
+  }
   return r.json()
 }
 

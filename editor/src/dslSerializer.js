@@ -48,6 +48,7 @@ export function dslToFlow(dslText) {
       type: 'dsl', // single React Flow renderer; the node's data.type drives styling
       position: { x, y },
       data: { ...n.data, __nodeType: n.data?.type || 'unknown' },
+      _dslRaw: n,
     }
   })
 
@@ -59,6 +60,7 @@ export function dslToFlow(dslText) {
     targetHandle: e.targetHandle || null,
     animated: true,
     data: e.data || {},
+    _dslRaw: e,
   }))
 
   return {
@@ -79,24 +81,27 @@ export function flowToDsl({ nodes, edges, meta }) {
   const cleanNodes = nodes.map((n) => {
     const data = { ...n.data }
     delete data.__nodeType // internal UI-only flag
-    const node = { id: n.id, data }
+    const node = { ...(n._dslRaw || {}), id: n.id, data }
     // persist positions so re-import keeps the layout
     node.__pos = { x: Math.round(n.position.x), y: Math.round(n.position.y) }
     return node
   })
 
-  const cleanEdges = edges.map((e, i) => {
-    const out = { source: e.source, target: e.target }
+  const cleanEdges = edges.map((e) => {
+    const out = { ...(e._dslRaw || {}), source: e.source, target: e.target }
+    delete out.id
     if (e.sourceHandle) out.sourceHandle = e.sourceHandle
     if (e.targetHandle) out.targetHandle = e.targetHandle
     if (e.data && Object.keys(e.data).length) out.data = e.data
     return out
   })
 
+  const raw = meta?.raw && typeof meta.raw === 'object' ? structuredClone(meta.raw) : {}
   const doc = {
-    kind: meta?.kind || 'graph',
-    dependencies: meta?.dependencies || [],
-    graph: { nodes: cleanNodes, edges: cleanEdges },
+    ...raw,
+    kind: meta?.kind || raw.kind || 'graph',
+    dependencies: meta?.dependencies || raw.dependencies || [],
+    graph: { ...(raw.graph || {}), nodes: cleanNodes, edges: cleanEdges },
   }
   return doc
 }

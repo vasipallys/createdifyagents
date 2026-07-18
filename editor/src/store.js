@@ -4,6 +4,7 @@
 // ============================================================================
 
 import { create } from 'zustand'
+import { applyEdgeChanges, applyNodeChanges } from 'reactflow'
 import {
   emptyFlow,
   newGraph,
@@ -17,6 +18,7 @@ export const useStore = create((set, get) => ({
   selectedId: null,
   dirty: false,
   currentFile: null,
+  currentRevision: null,
   // server-side validation result from /dsl/validate
   validation: { status: 'idle', message: '', loadable: null },
 
@@ -26,12 +28,15 @@ export const useStore = create((set, get) => ({
   // ---- graph mutations ----
   setFlow: (flow, opts = {}) =>
     set({ flow, dirty: !opts.silent, selectedId: null, currentFile: opts.file ?? null,
+          currentRevision: opts.revision ?? null,
           validation: { status: 'idle', message: '', loadable: null } }),
 
   newDoc: () => set({ flow: newGraph(), dirty: false, selectedId: null, currentFile: null,
+                      currentRevision: null,
                       validation: { status: 'idle', message: '', loadable: null } }),
 
-  clear: () => set({ flow: emptyFlow(), dirty: false, selectedId: null, currentFile: null }),
+  clear: () => set({ flow: emptyFlow(), dirty: false, selectedId: null, currentFile: null,
+                     currentRevision: null }),
 
   addNode: (type, position) => {
     const id = makeId(type)
@@ -65,9 +70,17 @@ export const useStore = create((set, get) => ({
 
   // React Flow bulk callbacks
   onNodesChange: (changes) =>
-    set((s) => ({ flow: { ...s.flow, nodes: applyChanges(s.flow.nodes, changes) } })),
+    set((s) => ({
+      flow: { ...s.flow, nodes: applyNodeChanges(changes, s.flow.nodes) },
+      // Dimension/selection updates are React Flow bookkeeping. Only user
+      // mutations should mark the graph as changed.
+      dirty: s.dirty || changes.some((c) => c.type === 'position' || c.type === 'remove'),
+    })),
   onEdgesChange: (changes) =>
-    set((s) => ({ flow: { ...s.flow, edges: applyChanges(s.flow.edges, changes) } })),
+    set((s) => ({
+      flow: { ...s.flow, edges: applyEdgeChanges(changes, s.flow.edges) },
+      dirty: s.dirty || changes.some((c) => c.type !== 'select'),
+    })),
   onConnect: (conn) =>
     set((s) => ({
       flow: {
@@ -88,9 +101,9 @@ export const useStore = create((set, get) => ({
     })),
 
   // ---- import / export ----
-  importDsl: (dslText, file = null) => {
+  importDsl: (dslText, file = null, revision = null) => {
     const flow = dslToFlow(dslText)
-    set({ flow, dirty: false, selectedId: null, currentFile: file,
+    set({ flow, dirty: false, selectedId: null, currentFile: file, currentRevision: revision,
           validation: { status: 'idle', message: '', loadable: null } })
     return flow
   },
@@ -98,20 +111,6 @@ export const useStore = create((set, get) => ({
 
   setMeta: (patch) => set((s) => ({ flow: { ...s.flow, meta: { ...s.flow.meta, ...patch } }, dirty: true })),
   setValidation: (v) => set({ validation: v }),
-  markSaved: (file) => set({ dirty: false, currentFile: file }),
+  markSaved: (file, revision) => set({ dirty: false, currentFile: file,
+                                       currentRevision: revision ?? null }),
 }))
-
-// minimal React Flow change applier (position/select/remove) without the lib
-function applyChanges(items, changes) {
-  let out = items
-  for (const c of changes) {
-    if (c.type === 'remove') {
-      out = out.filter((i) => i.id !== c.id)
-    } else if (c.type === 'position' && c.position) {
-      out = out.map((i) => (i.id === c.id ? { ...i, position: c.position, dragging: c.dragging } : i))
-    } else if (c.type === 'select') {
-      // handled via select(); no-op here to avoid clobbering store selection
-    }
-  }
-  return out
-}
