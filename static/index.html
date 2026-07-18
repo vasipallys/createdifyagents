@@ -99,6 +99,13 @@
   button:disabled { opacity: 0.4; cursor: not-allowed; }
   .actions { margin-top: 16px; display: flex; gap: 10px; }
 
+  .result-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+  .result-head h2 { margin: 0; }
+  .result-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
+  .result-actions button { padding: 7px 11px; font-size: 12px; background: var(--panel-2); border: 1px solid var(--border); }
+  .result-actions button.active { background: var(--accent-strong); border-color: var(--accent); }
+  .result-actions .export-button { color: var(--accent); }
+
   /* result card */
   .result-empty { color: var(--muted); padding: 56px 20px; text-align: center; border: 1px dashed var(--border); border-radius: 10px; }
   .status-bar { display: flex; align-items: center; gap: 10px; padding: 12px 14px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; margin-bottom: 12px; font-size: 13px; }
@@ -132,6 +139,21 @@
   .batch-item.pending .batch-status-chip { color: var(--muted); }
   .batch-detail { padding: clamp(14px,2vw,22px); border-top: 1px solid var(--border); background: var(--panel); }
   .batch-detail .points-hero .num { font-size: 38px; }
+
+  .summary-kpis { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; margin-bottom: 16px; }
+  .summary-kpi { padding: 14px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; }
+  .summary-kpi .value { display: block; color: var(--accent); font: 800 24px/1 var(--mono); margin-bottom: 6px; }
+  .summary-kpi .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .summary-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+  .summary-table { width: 100%; min-width: 760px; border-collapse: collapse; font-size: 12px; }
+  .summary-table th, .summary-table td { padding: 11px 12px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  .summary-table th { color: var(--muted); background: var(--panel-2); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; position: sticky; top: 0; }
+  .summary-table tr:last-child td { border-bottom: 0; }
+  .summary-table .summary-story { min-width: 210px; font-weight: 700; overflow-wrap: break-word; }
+  .summary-table .summary-tldr { min-width: 280px; color: var(--muted); }
+  .summary-status { display: inline-block; padding: 3px 7px; border: 1px solid currentColor; border-radius: 999px; white-space: nowrap; font-family: var(--mono); font-size: 10px; }
+  .summary-status.ok { color: var(--green); }
+  .summary-status.failed { color: var(--red); }
 
   .points-hero {
     display: grid; grid-template-columns: auto auto minmax(220px,1fr); align-items: center; gap: 16px; padding: 18px; border-radius: 10px;
@@ -213,6 +235,9 @@
     .points-hero { grid-template-columns: auto 1fr; }
     .points-hero .tldr { grid-column: 1 / -1; text-align: left; border-top: 1px solid var(--border); padding-top: 12px; }
     .story-chip-list { grid-template-columns: 1fr; }
+    .result-head { align-items: flex-start; flex-direction: column; }
+    .result-actions { justify-content: flex-start; }
+    .summary-kpis { grid-template-columns: repeat(2,minmax(0,1fr)); }
   }
 </style>
 </head>
@@ -282,7 +307,15 @@
 
   <!-- =========================== RESULT =========================== -->
   <section class="panel" id="result-panel">
-    <h2>Estimate</h2>
+    <div class="result-head">
+      <h2>Estimate</h2>
+      <div class="result-actions" id="result-actions" style="display:none" aria-label="Final result actions">
+        <button id="summary-view-btn" class="secondary" onclick="setResultView('summary')">Summary</button>
+        <button id="detail-view-btn" class="secondary" onclick="setResultView('details')">Details</button>
+        <button class="secondary export-button" onclick="exportMarkdown()">Export MD</button>
+        <button id="excel-export-btn" class="secondary export-button" onclick="exportExcel()">Export Excel</button>
+      </div>
+    </div>
     <div id="result-body">
       <div class="result-empty">Run an estimate to see the evidence-led result here.</div>
     </div>
@@ -302,6 +335,31 @@ function invariantSatisfied(r) {
 }
 
 const $ = (id) => document.getElementById(id);
+window.__final_results = null;
+window.__result_view = "summary";
+
+function setResultActions(visible) {
+  $("result-actions").style.display = visible ? "flex" : "none";
+}
+
+function syncResultActionState() {
+  $("summary-view-btn").classList.toggle("active", window.__result_view === "summary");
+  $("detail-view-btn").classList.toggle("active", window.__result_view === "details");
+}
+
+function setResultView(view) {
+  if (!window.__final_results || !["summary", "details"].includes(view)) return;
+  window.__result_view = view;
+  syncResultActionState();
+  if (window.__final_results.kind === "batch") {
+    renderBatchResults();
+    return;
+  }
+  const item = window.__final_results.items[0];
+  $("result-body").innerHTML = view === "summary"
+    ? summaryHtml(window.__final_results.items)
+    : resultHtml(item.result, item.trace_id || "");
+}
 
 // ---- source tabs ----
 function switchSrc(name) {
@@ -393,6 +451,8 @@ async function uploadSheet() {
 let estimateController = null;
 async function runEstimate() {
   $("err").textContent = "";
+  window.__final_results = null;
+  setResultActions(false);
   const active = document.querySelector(".src-tabs button.active").dataset.src;
   if (active === "sheet" && window.__sheet_stories && window.__sheet_stories.length) {
     return runBatchEstimate(window.__sheet_stories);
@@ -488,6 +548,8 @@ async function runEstimate() {
 
 async function runBatchEstimate(stories) {
   $("err").textContent = "";
+  window.__final_results = null;
+  setResultActions(false);
   if (!stories || !stories.length) {
     $("err").textContent = "Upload a spreadsheet containing at least one story.";
     return;
@@ -606,6 +668,21 @@ function handleBatchSSE(evt) {
     state.complete = true;
     state.succeeded = data.succeeded;
     state.failed = data.failed;
+    window.__final_results = {
+      kind: "batch",
+      generated_at: new Date().toISOString(),
+      items: state.items.map(item => ({
+        index: item.index,
+        title: item.title,
+        status: item.status === "done" ? "done" : "failed",
+        result: item.result || null,
+        error: item.error || "",
+        trace_id: item.traceId || state.traceId || "",
+      })),
+    };
+    window.__result_view = "summary";
+    setResultActions(true);
+    syncResultActionState();
   }
   renderBatchResults();
 }
@@ -613,6 +690,10 @@ function handleBatchSSE(evt) {
 function renderBatchResults() {
   const state = window.__batch_state;
   if (!state) return;
+  if (state.complete && window.__final_results && window.__result_view === "summary") {
+    $("result-body").innerHTML = summaryHtml(window.__final_results.items);
+    return;
+  }
   const openItems = new Set(
     Array.from(document.querySelectorAll(".batch-item[open]"))
       .map(el => Number(el.dataset.index))
@@ -693,7 +774,184 @@ function renderStatus(msg) {
 }
 
 function renderResult(r) {
-  $("result-body").innerHTML = resultHtml(r, window.__trace_id);
+  const story = currentStory();
+  window.__final_results = {
+    kind: "single",
+    generated_at: new Date().toISOString(),
+    items: [{
+      index: 0,
+      title: (r && r.title) || (story && story.title) || "Story estimate",
+      status: invariantSatisfied(r) ? "done" : "failed",
+      result: r || null,
+      error: r && r.error ? r.error : "",
+      trace_id: window.__trace_id || "",
+    }],
+  };
+  window.__result_view = "summary";
+  setResultActions(true);
+  syncResultActionState();
+  $("result-body").innerHTML = summaryHtml(window.__final_results.items);
+}
+
+// ---- Final summary + exports ------------------------------------------------
+function summaryHtml(items) {
+  const certified = items.filter(item => invariantSatisfied(item.result));
+  const failed = items.length - certified.length;
+  const totalPoints = certified.reduce((sum, item) => sum + item.result.points, 0);
+  const average = certified.length ? (totalPoints / certified.length).toFixed(1) : "—";
+  let html = `<div class="summary-kpis">
+    <div class="summary-kpi"><span class="value">${items.length}</span><span class="label">Total stories</span></div>
+    <div class="summary-kpi"><span class="value">${certified.length}</span><span class="label">Certified</span></div>
+    <div class="summary-kpi"><span class="value">${failed}</span><span class="label">Failed / redacted</span></div>
+    <div class="summary-kpi"><span class="value">${average}</span><span class="label">Average points</span></div>
+  </div>`;
+  html += `<div class="summary-table-wrap"><table class="summary-table">
+    <thead><tr><th>#</th><th>Story</th><th>Status</th><th>Points</th><th>Person-days</th><th>Split</th><th>TL;DR / error</th></tr></thead><tbody>`;
+  for (const item of items) {
+    const r = item.result;
+    const ok = invariantSatisfied(r);
+    const pd = r && r.person_days ? `${r.person_days.min}–${r.person_days.max}` : "—";
+    const note = ok ? r.tldr : (item.error || (r && r.error) || "Estimate was not certified");
+    html += `<tr>
+      <td>${item.index + 1}</td>
+      <td class="summary-story">${escapeHtml(item.title || (r && r.title) || "Untitled")}</td>
+      <td><span class="summary-status ${ok ? "ok" : "failed"}">${ok ? "Certified" : "Failed"}</span></td>
+      <td>${ok ? escapeHtml(r.points) : "—"}</td>
+      <td>${escapeHtml(pd)}</td>
+      <td>${r && r.must_split ? "Required" : "No"}</td>
+      <td class="summary-tldr">${escapeHtml(note)}</td>
+    </tr>`;
+  }
+  html += `</tbody></table></div>`;
+  if (certified.length) {
+    html += `<div class="section" style="margin-top:16px"><h3>Portfolio totals</h3><div class="why">${totalPoints} certified story points across ${certified.length} ${certified.length === 1 ? "story" : "stories"}. Use Details for complete evidence, risks, assumptions, and recommended splits.</div></div>`;
+  }
+  return html;
+}
+
+function markdownCell(value) {
+  return String(value == null ? "" : value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
+function markdownList(values, render = value => String(value)) {
+  return values && values.length ? values.map(value => `- ${render(value)}`).join("\n") : "- None reported";
+}
+
+function buildMarkdownExport(finalResults) {
+  const items = finalResults.items || [];
+  const certified = items.filter(item => invariantSatisfied(item.result));
+  const totalPoints = certified.reduce((sum, item) => sum + item.result.points, 0);
+  const lines = [
+    "# Story Pointer — Final Estimate Summary",
+    "",
+    `Generated: ${finalResults.generated_at || new Date().toISOString()}`,
+    "",
+    `- Total stories: ${items.length}`,
+    `- Certified: ${certified.length}`,
+    `- Failed / redacted: ${items.length - certified.length}`,
+    `- Total certified points: ${totalPoints}`,
+    "",
+    "| # | Story | Status | Points | Person-days | Must split | TL;DR / error |",
+    "|---:|---|---|---:|---|---|---|",
+  ];
+  for (const item of items) {
+    const r = item.result;
+    const ok = invariantSatisfied(r);
+    const pd = r && r.person_days ? `${r.person_days.min}–${r.person_days.max}` : "";
+    lines.push(`| ${item.index + 1} | ${markdownCell(item.title || (r && r.title))} | ${ok ? "Certified" : "Failed / redacted"} | ${ok ? r.points : ""} | ${pd} | ${r && r.must_split ? "Yes" : "No"} | ${markdownCell(ok ? r.tldr : (item.error || (r && r.error)))} |`);
+  }
+
+  for (const item of items) {
+    const r = item.result;
+    const ok = invariantSatisfied(r);
+    lines.push("", `## ${item.index + 1}. ${item.title || (r && r.title) || "Untitled"}`, "");
+    if (!ok) {
+      lines.push(`**Status:** Failed / redacted`, "", item.error || (r && r.error) || "Estimate was not certified.");
+      continue;
+    }
+    const pd = r.person_days ? `${r.person_days.min}–${r.person_days.max} person-days` : "Not provided";
+    lines.push(
+      `**Points:** ${r.points}  `,
+      `**Person-days:** ${pd}  `,
+      `**Provider/model:** ${r.provider || "—"} / ${r.model || "—"}  `,
+      `**Must split:** ${r.must_split ? "Yes" : "No"}`,
+      "",
+      `> ${r.tldr}`,
+      "",
+      "### Why",
+      "",
+      r.plain_language_why,
+      "",
+      "### Factor evidence",
+      "",
+      "| Factor | Level | Evidence |",
+      "|---|---|---|",
+      ...(r.factors || []).map(f => `| ${markdownCell(prettyId(f.id))} | ${markdownCell(f.level)} | ${markdownCell(f.evidence)} |`),
+      "",
+      "### Risks",
+      "",
+      markdownList(r.risks, risk => `**${risk.severity}:** ${risk.description}${risk.mitigation ? ` — Mitigation: ${risk.mitigation}` : ""}`),
+      "",
+      "### Hidden work",
+      "",
+      markdownList(r.hidden_work),
+      "",
+      "### Assumptions",
+      "",
+      markdownList(r.assumptions),
+      "",
+      "### Recommended split",
+      "",
+      markdownList(r.recommended_split, split => `**${split.points} points — ${split.title}:** ${split.why || ""}`),
+    );
+    if (r.spike_needed) lines.push("", "### Spike", "", r.spike_reason || "Spike recommended.");
+    if (item.trace_id) lines.push("", `Trace ID: \`${item.trace_id}\``);
+  }
+  return lines.join("\n") + "\n";
+}
+
+function exportFilename(extension) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `story-pointer-results-${stamp}.${extension}`;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportMarkdown() {
+  if (!window.__final_results) return;
+  const markdown = buildMarkdownExport(window.__final_results);
+  downloadBlob(new Blob([markdown], {type: "text/markdown;charset=utf-8"}), exportFilename("md"));
+}
+
+async function exportExcel() {
+  if (!window.__final_results) return;
+  const button = $("excel-export-btn");
+  button.disabled = true;
+  const originalText = button.textContent;
+  button.textContent = "Preparing…";
+  try {
+    const response = await fetch("/export/results.xlsx", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({items: window.__final_results.items}),
+    });
+    if (!response.ok) throw new Error(await responseError(response) || `Excel export failed (${response.status}).`);
+    downloadBlob(await response.blob(), exportFilename("xlsx"));
+  } catch (error) {
+    $("err").textContent = error instanceof Error ? error.message : String(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 }
 
 function resultHtml(r, traceId = "") {
@@ -817,6 +1075,9 @@ function clearAll() {
   ["m_title","m_desc","m_ac","m_ctx","j_issue"].forEach(id => $(id).value = "");
   window.__jira_story = null; window.__sheet_stories = null; window.__batch_state = null;
   window.__trace_id = null;
+  window.__final_results = null;
+  window.__result_view = "summary";
+  setResultActions(false);
   $("jira_preview").innerHTML = ""; $("sheet_preview").innerHTML = "";
   $("err").textContent = "";
   $("result-body").innerHTML = `<div class="result-empty">Run an estimate to see the evidence-led result here.</div>`;

@@ -181,6 +181,15 @@ The Jira mapper:
 
 All parsed rows are sent through one sequential SSE batch. A failed row is reported separately and does not stop later rows.
 
+### Final summary and exports
+
+After a single estimate or an entire batch finishes, the result panel opens a **Summary** view with certified/failed counts, average points, total certified points, person-day ranges, split indicators, and one readable row per story. Select **Details** to return to the complete evidence cards.
+
+- **Export MD** downloads a Markdown report containing the summary table and full per-story evidence, risks, hidden work, assumptions, splits, and trace IDs.
+- **Export Excel** downloads a real `.xlsx` workbook with separate **Summary**, **Factors**, **Risks**, and **Supporting detail** worksheets. Text that could be interpreted as a spreadsheet formula is neutralized before writing.
+
+Export buttons appear only after a terminal result. Failed or redacted estimates remain in both exports without an unauthorized point value.
+
 The spreadsheet must have a recognizable title column. Column names are mapped with string heuristics:
 
 | Story field | Common accepted headers |
@@ -299,6 +308,7 @@ Content capture is off by default. Metadata such as provider, model, source, tok
 | `POST` | `/estimate` | Estimate one story as an SSE stream |
 | `POST` | `/estimate/sync` | Estimate one story and return JSON |
 | `POST` | `/estimate/batch` | Estimate multiple stories as a sequential SSE stream |
+| `POST` | `/export/results.xlsx` | Create a multi-sheet Excel workbook from final gated results |
 | `POST` | `/upload` | Parse an uploaded spreadsheet |
 | `GET` | `/jira/instances` | Return safe Jira name/version/auth summaries (never credentials) |
 | `POST` | `/jira/fetch` | Fetch and normalize a Jira issue |
@@ -443,7 +453,7 @@ Install development dependencies and run the backend suite:
 python -m pytest -q
 ```
 
-Tests disable Phoenix export and mock LLM calls, so they do not require a real provider key or a running collector. They cover schemas and prompt construction, provider request formats, response parsing, rate-limit retries, SSE contracts, batch isolation, Jira mapping, spreadsheet parsing, telemetry privacy, and the point/explanation invariant.
+Tests disable Phoenix export and mock LLM calls, so they do not require a real provider key or a running collector. They cover schemas and prompt construction, provider request formats, response parsing, rate-limit retries, SSE contracts, batch isolation, Jira mapping, spreadsheet parsing, telemetry privacy, final Markdown/Excel controls, workbook structure, formula-injection protection, and the point/explanation invariant.
 
 Build the React editor to verify its production bundle:
 
@@ -476,6 +486,7 @@ curl http://127.0.0.1:8000/health/telemetry
 |   |-- anchors.py                 Rubric, anchors, and prompt assembly
 |   |-- llm.py                     Provider request builders and response parsing
 |   |-- engine.py                  Calls, retries, SSE, batching, gate, telemetry
+|   |-- exports.py                 Safe multi-sheet XLSX final-result export
 |   |-- schema.py                  Pydantic input/result contracts
 |   |-- dsl_api.py                 DSL file CRUD and validation routes
 |   |-- telemetry.py               Phoenix/OpenTelemetry configuration

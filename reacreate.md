@@ -108,6 +108,7 @@ The recommended initial production release is Python-authoritative because it ha
 │   ├── config.py
 │   ├── dsl_api.py
 │   ├── engine.py
+│   ├── exports.py
 │   ├── llm.py
 │   ├── schema.py
 │   ├── telemetry.py
@@ -132,17 +133,20 @@ The recommended initial production release is Python-authoritative because it ha
 │       ├── Toolbar.jsx
 │       ├── api.js
 │       ├── dslSerializer.js
+│       ├── editorModel.test.js
 │       ├── main.jsx
 │       ├── nodeTypes.js
 │       ├── store.js
 │       └── styles.css
 └── tests/
+    ├── __init__.py
     ├── conftest.py
     ├── test_api_sse.py
     ├── test_engine.py
+    ├── test_exports.py
     ├── test_invariant.py
-    ├── test_llm_provider.py
-    ├── test_schema_and_prompt.py
+    ├── test_production_safety.py
+    ├── test_schema.py
     ├── test_sources.py
     └── test_telemetry.py
 ```
@@ -452,13 +456,58 @@ Phoenix tracing is optional and must never prevent estimation startup or respons
 
 Prompt, story, response, Jira content, and spreadsheet content are captured only when `PHOENIX_CAPTURE_CONTENT=true`. Default is metadata only. Expose trace IDs in result UI only when useful and never expose collector credentials. Provide idempotent initialization and shutdown/flush hooks for tests and process exit.
 
-### 9.9 `dsl_api.py`
+### 9.9 `exports.py`
+
+Own the server-side Excel export contract and workbook generator. Markdown export remains browser-side because it requires no server processing; Excel MUST be produced as a genuine Office Open XML workbook rather than CSV or HTML renamed to `.xlsx`.
+
+The request models are:
+
+```json
+{
+  "items": [
+    {
+      "index": 0,
+      "title": "DB-001: Biometric Login",
+      "status": "done",
+      "result": { "ok": true, "points": 8, "plain_language_why": "...", "tldr": "..." },
+      "error": "",
+      "trace_id": "optional-trace-id"
+    }
+  ]
+}
+```
+
+`ExportResultItem` rules:
+
+- `index` is an integer greater than or equal to zero;
+- `title` defaults to empty and is limited to 1,000 characters;
+- `status` is exactly `done | failed`;
+- `result` is an optional canonical `StoryPointResult`;
+- `error` defaults to empty and is limited to 10,000 characters;
+- `trace_id` defaults to empty and is limited to 256 characters.
+
+`ResultsExportRequest.items` contains between 1 and 1,000 items. Workbook certification MUST be recalculated with `result.is_invariant_satisfied()`; never trust the submitted item status when deciding whether a point value may be written. An uncertified or missing result is labeled `Failed / redacted` and its points cell is blank.
+
+`build_results_workbook(items)` returns XLSX bytes in memory using openpyxl. It creates these sheets and exact columns:
+
+| Sheet | Columns |
+|---|---|
+| `Summary` | `#`, `Story`, `Status`, `Points`, `TL;DR`, `Why`, `Person Days Min`, `Person Days Max`, `Must Split`, `Spike Needed`, `Provider`, `Model`, `Error`, `Trace ID` |
+| `Factors` | `#`, `Story`, `Factor`, `Level`, `Evidence` |
+| `Risks` | `#`, `Story`, `Severity`, `Risk`, `Mitigation` |
+| `Supporting detail` | `#`, `Story`, `Category`, `Item`, `Detail`, `Points/Level` |
+
+Supporting-detail categories are deciding driver, closest anchor, hidden work, assumption, recommended split, layer effort, and spike. Each sheet freezes row 1 using `A2`, enables an auto-filter, applies a blue/white bold header, wraps body text, aligns cells to the top, and assigns readable fixed column widths.
+
+Every cell passes through one sanitization helper. Preserve booleans/numbers as typed values, convert `None` to blank, truncate strings to Excel's 32,767-character cell limit, and prefix an apostrophe when the left-trimmed text begins with `=`, `+`, `-`, or `@`. This formula-injection protection applies to titles and all model/user-provided text.
+
+### 9.10 `dsl_api.py`
 
 Compatibility operations list DSL files, return file content, save YAML, and validate YAML/graph structure. Resolve paths under the `dsl` directory and reject traversal and unsupported names.
 
 The hardened implementation uses a strict filename allowlist, path containment, content limits, validation before write, an optional development/required-production `X-DSL-API-Key`, atomic same-directory replacement, and SHA-256 revision-based optimistic concurrency. A mature multi-user deployment must additionally use identity-based administrator/editor authorization, durable history/backups, and actor/time/action auditing. Validation errors should include safe line/column and node context.
 
-### 9.10 `api.py`
+### 9.11 `api.py`
 
 Create the FastAPI application, initialize telemetry, add CORS, mount `/static`, serve `/`, register estimation/source/DSL routes, and conditionally mount built editor assets at `/editor` when `editor/dist` exists at application import/startup.
 
@@ -474,6 +523,7 @@ Endpoint compatibility matrix:
 | POST | `/estimate` | `StoryInput` JSON | SSE stream |
 | POST | `/estimate/sync` | `StoryInput` JSON | gated result JSON |
 | POST | `/estimate/batch` | `StoryBatch` JSON | batch SSE stream |
+| POST | `/export/results.xlsx` | `ResultsExportRequest` | genuine multi-sheet XLSX attachment |
 | GET | `/jira/instances` | none | compatibility currently risks full objects; production returns redacted summaries only |
 | POST | `/jira/fetch` | instance name and issue key | normalized `StoryInput` |
 | POST | `/upload` | multipart file | `StoryBatch`/story list |
@@ -485,7 +535,9 @@ Endpoint compatibility matrix:
 
 SSE responses use `event: <type>\ndata: <JSON>\n\n`, UTF-8, no caching, and proxy buffering disabled. JSON serialization must handle Pydantic models consistently. Disconnect/cancellation must cancel provider work where possible. Production error responses use a common envelope containing `code`, safe `message`, `request_id`, optional field details, and appropriate HTTP status; unexpected exceptions are not returned verbatim.
 
-### 9.11 `run.py`
+The Excel route is `POST /export/results.xlsx`. It validates `ResultsExportRequest`, passes items to `build_results_workbook`, and streams an in-memory `BytesIO` response with media type `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`. Set `Content-Disposition` to an attachment named `story-pointer-<UTC YYYYMMDD-HHMMSS>.xlsx`.
+
+### 9.12 `run.py`
 
 Provide CLI arguments for host, port, reload, and launching Phoenix. When requested, start Phoenix as a hidden child process, poll readiness for at most 90 seconds, start Uvicorn, and terminate the child cleanly on shutdown. Production should run Phoenix as a separately supervised service rather than a child of the API.
 
@@ -532,7 +584,18 @@ Use `fetch()` with a `ReadableStream` for POST SSE because `EventSource` cannot 
 - detect premature EOF before a terminal result/error;
 - use `AbortController` for cancel/replacement and cleanup.
 
-Batch compatibility state is held in `window.__batch_state`. Full list rerenders must preserve which details are expanded. Production SHOULD move state into a module/controller and update only the affected row to reduce repeated DOM work.
+Batch compatibility state is held in `window.__batch_state`. Full list rerenders must preserve which details are expanded. Terminal export/view state is held in:
+
+```js
+window.__result_view = "summary" | "details"
+window.__final_results = {
+  kind: "single" | "batch",
+  generated_at: "ISO-8601 timestamp",
+  items: [{ index, title, status, result, error, trace_id }]
+}
+```
+
+Starting a new estimate or selecting Clear resets final-result state and hides all final actions. A single terminal `result` creates one item. A batch snapshot is created only on `batch_complete`, converts every non-`done` item to export status `failed`, and retains per-item or batch trace IDs. The default terminal view is Summary. Production SHOULD move these globals into a module/controller and update only the affected batch row to reduce repeated DOM work.
 
 ### 10.4 Safe result rendering
 
@@ -556,6 +619,22 @@ Render a result in this order:
 14. collapsible raw JSON for diagnostics.
 
 For a batch, show completed/total, success/failure counts, an accessible progress bar, and one bordered row per story. Each row has index, readable title, result chip, short summary, and expandable full details. Failure rows remain visible and do not stop later rows.
+
+After a terminal single or batch result, expose four controls: **Summary**, **Details**, **Export MD**, and **Export Excel**. They remain hidden before terminal completion. Summary is the default; Details restores the complete single result card or the expandable batch list.
+
+Summary certification is recalculated with the same browser invariant and does not trust `item.status`. It contains four KPI cards—total stories, certified count, failed/redacted count, and average certified points—followed by a horizontally scrollable table with `#`, story, status, points, person-days, split, and TL;DR/error. Invalid results show `Failed`, an em dash instead of points, and their error. When at least one result is certified, a portfolio note states total certified points and certified story count. At approximately 680px, the action row wraps and the KPI grid changes from four columns to two.
+
+Markdown export is generated entirely client-side by `buildMarkdownExport()` and downloaded from a UTF-8 `text/markdown` Blob. The filename is `story-pointer-results-<ISO timestamp with colon/dot replaced by hyphen>.md`. It contains:
+
+- report heading, generated timestamp, total/certified/failed counts, and total certified points;
+- a summary Markdown table;
+- one section per story;
+- for certified items: points, person-day range, provider/model, must-split flag, TL;DR, plain-language why, factor table, risks, hidden work, assumptions, recommended splits, optional spike reason, and optional trace ID;
+- for failed/redacted items: status and safe error, with no point value.
+
+Escape pipe characters and replace newlines in Markdown table cells so story/model text cannot corrupt the table structure. Lists with no items render `None reported`.
+
+Excel export disables its button and shows `Preparing…`, POSTs `{items: window.__final_results.items}` to `/export/results.xlsx`, validates HTTP success, downloads the returned Blob as `story-pointer-results-<sanitized ISO timestamp>.xlsx`, and restores the button in `finally`. Failures appear in the page error area. The workbook uses the four sheets and safeguards specified in section 9.9.
 
 Buttons have disabled/loading states, keyboard focus rings, and actionable errors. Color is never the sole status signal. Production adds a CSP-compatible script strategy (external hashed assets or nonces), security headers, reduced-motion support, and automated accessibility testing.
 
@@ -729,21 +808,26 @@ At the reverse proxy/load balancer, disable response buffering for SSE, raise id
 
 ### 15.1 Compatibility suite already represented in the repository
 
-The original audited Python suite had 68 passing tests. The hardened tree adds production-safety tests for redaction, limits, production configuration, DSL authorization, atomic save, and revision conflicts. Together they cover:
+The current audited Python suite has **77 passing tests**. It includes production-safety and final-export regressions and covers:
 
 - schema defaults, acceptance-criteria coercion, prompt contents, factors, and anchors;
 - invariant success, missing explanation, invalid points, and 13-point split rules;
 - provider request shapes, parsing/coercion, retry behavior, stream ordering, and batch failure isolation;
 - manual, Jira Cloud/Server/ADF, CSV/XLS/XLSX source transformations;
-- API health/config/estimate/upload/Jira/DSL and SSE framing;
-- estimator HTML safety/behavior assertions, including the batch title visibility regression;
+- API health/config/estimate/upload/Jira/DSL/Excel-export and SSE framing;
+- estimator HTML safety/behavior assertions, including the batch title visibility regression and Summary/Details/Export controls;
+- XLSX sheet names, summary/detail rows, styles/freeze behavior, genuine ZIP/XLSX response bytes, attachment headers, and formula-injection neutralization;
+- production redaction, request limits, safe production configuration, DSL authorization, atomic save, and revision conflicts;
 - telemetry disabled/enabled behavior, semantic spans, privacy defaults, and token metadata.
 
 `tests/conftest.py` disables Phoenix by default so tests do not start exporters or require a local collector. Network calls are mocked; the test suite must be deterministic and must never spend provider credits.
 
+`tests/test_exports.py` builds a workbook in memory, reopens it with openpyxl, verifies all four worksheets and representative values, confirms formula-like titles are stored as text rather than formulas, and exercises `/export/results.xlsx` through FastAPI's test client. `tests/test_api_sse.py` asserts that the final-action controls and client export functions exist and call the documented endpoint. The browser script must also pass `node --check` after extraction from `static/index.html`.
+
 ### 15.2 Required backend additions for production
 
 - Contract snapshots for every endpoint and every SSE event type.
+- Export authorization/quotas as required by the deployment, oversized nested result collections, workbook generation failure, Unicode/control characters, and performance at the maximum allowed export size.
 - Authentication/RBAC matrix, including anonymous denial of writes.
 - Proof that Jira/provider/DSL secrets never appear in config, errors, logs, traces, or OpenAPI examples.
 - CORS and CSRF tests.
@@ -757,6 +841,8 @@ The original audited Python suite had 68 passing tests. The hardened tree adds p
 - If graphs execute: Python/graph parity fixtures, sandbox escape attempts, timeout, memory limit, egress policy, and invariant-bypass attempts.
 
 ### 15.3 Required editor tests
+
+The current `editor/src/editorModel.test.js` suite has **3 passing Vitest tests** covering nested LLM defaults, deep-cloned compound defaults, and preservation of unknown document/graph/node/edge metadata. Expand it with the cases below.
 
 Vitest/React Testing Library:
 
@@ -777,6 +863,7 @@ Playwright end-to-end:
 - desktop/tablet/mobile screenshots; inspector remains reachable at mobile widths.
 - keyboard-only workflow and automated accessibility scan.
 - estimator manual mocked SSE success/error, Jira populate, upload batch, expandable detail preservation, cancellation, and readable long titles at all breakpoints.
+- terminal Summary/Details switching, hidden-before-terminal actions, Markdown download contents, Excel POST/download/error state, failed-result point redaction, and mobile summary-table scrolling.
 
 ### 15.4 Quality gates
 
@@ -807,12 +894,13 @@ Rebuild in this order so each stage has executable acceptance criteria:
 5. Implement manual, Jira, and spreadsheet adapters with fixture tests.
 6. Implement telemetry behind a disabled-by-default test seam.
 7. Implement FastAPI routes, common errors, redacted config, and SSE framing.
-8. Recreate the estimator HTML/JS/CSS and its responsive/accessibility tests.
-9. Recreate the React editor catalog, store, serializer, canvas, inspector, toolbar, and API.
-10. Recreate both DSL reference artifacts and round-trip validation fixtures.
-11. Apply security controls rather than shipping compatibility-only administrative behavior.
-12. Add container, reverse-proxy settings, CI, operational docs, metrics, alerts, and recovery procedures.
-13. Run all quality gates and a staging smoke test with one real provider and a nonproduction Jira project.
+8. Implement `exports.py`, the typed final-item request, invariant-aware workbook generation, cell sanitization, and the XLSX endpoint with workbook round-trip tests.
+9. Recreate the estimator HTML/JS/CSS, terminal result snapshot, Summary/Details states, Markdown/Excel actions, and responsive/accessibility tests.
+10. Recreate the React editor catalog, store, serializer, canvas, inspector, toolbar, and API.
+11. Recreate both DSL reference artifacts and round-trip validation fixtures.
+12. Apply security controls rather than shipping compatibility-only administrative behavior.
+13. Add container, reverse-proxy settings, CI, operational docs, metrics, alerts, and recovery procedures.
+14. Run all quality gates and a staging smoke test with one real provider and a nonproduction Jira project.
 
 ## 17. Production acceptance checklist
 
@@ -825,6 +913,10 @@ The application is complete only when all items below are true:
 - [ ] SSE emits documented events incrementally through the production proxy and handles disconnects.
 - [ ] Batch failure isolation and progress totals are exact.
 - [ ] Long batch titles remain readable on desktop and mobile.
+- [ ] Terminal single and batch runs default to Summary and can switch back to complete Details without losing result state.
+- [ ] Markdown export contains summary plus certified/failed per-story sections and never writes a point for an uncertified result.
+- [ ] Excel export is a valid four-sheet XLSX, recalculates certification server-side, preserves failed/redacted rows without points, and neutralizes formula-like text.
+- [ ] Export controls are hidden before terminal completion and remain usable at mobile widths.
 - [ ] Phoenix is optional, content-private by default, and exporter failure is nonfatal.
 - [ ] Jira credentials and all provider secrets are absent from every client-visible response.
 - [ ] Estimation and DSL permissions are tested; DSL writes are validated, atomic, revisioned, and audited.
@@ -856,17 +948,18 @@ The application is complete only when all items below are true:
 - Repeated full batch rerenders and global window state are maintainability/performance debt.
 - Prompt logic duplicated between Python and YAML can drift.
 - Silent point snapping can obscure model contract violations without audit metadata.
+- Export requests are bounded by item count but nested factor/risk/supporting collections still need aggregate row/cell limits at an untrusted public boundary; never remove formula-injection neutralization.
 
 ## 19. Supporting artifacts and context
 
 - `banking_jira_stories.csv` is realistic sample input and should remain a nonsecret demo/fixture source.
 - `banking_jira_stories_role_model.md` supplies domain/role modeling context. It informs examples but does not override the canonical API schemas.
 - `dify-sse-complete-architecture.md` is architectural background for Dify/graphon/SSE. Treat it as explanatory, not proof that the current HTTP routes execute the graph.
-- `README.md` is the operator/user entry point. It must state prerequisites, provider configuration, development/production commands, all input modes, editor build/use, test commands, troubleshooting, and the DSL execution limitation truthfully.
+- `README.md` is the operator/user entry point. It must state prerequisites, provider configuration, development/production commands, all input modes, terminal Summary/Details and Markdown/Excel export usage, editor build/use, test commands, troubleshooting, and the DSL execution limitation truthfully.
 - `recreate_all.md` is a legacy, backend-heavy reconstruction record. This `reacreate.md` supersedes it for full-application and production reconstruction.
 
 ## 20. Definition of fidelity
 
-A rebuild is faithful when a user can supply the same manual/Jira/spreadsheet story, observe the same progress model, receive a semantically equivalent gated result, inspect the same evidence sections, edit and round-trip the same DSL graphs, and operate the system with no hidden reliance on the original repository. Exact LLM wording is not deterministic; contracts, safety decisions, event ordering, source normalization, UI capability, and persistence semantics are.
+A rebuild is faithful when a user can supply the same manual/Jira/spreadsheet story, observe the same progress model, receive a semantically equivalent gated result, inspect the same evidence sections, switch between terminal summary and detail views, download equivalent Markdown and four-sheet XLSX reports, edit and round-trip the same DSL graphs, and operate the system with no hidden reliance on the original repository. Exact LLM wording is not deterministic; contracts, safety decisions, event ordering, source normalization, export redaction, UI capability, and persistence semantics are.
 
 A rebuild is production-ready only when it also satisfies sections 13–17. Passing the compatibility suite alone is necessary but not sufficient.

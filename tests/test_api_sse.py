@@ -118,6 +118,20 @@ def test_batch_result_layout_keeps_titles_readable():
     assert 'class="story-chip-list"' in html
 
 
+def test_final_results_have_summary_markdown_and_excel_exports():
+    html = (Path(__file__).parents[1] / "static" / "index.html").read_text(encoding="utf-8")
+
+    assert 'id="summary-view-btn"' in html
+    assert 'id="detail-view-btn"' in html
+    assert "function summaryHtml(items)" in html
+    assert 'class="summary-table"' in html
+    assert "function buildMarkdownExport(finalResults)" in html
+    assert "function exportMarkdown()" in html
+    assert "function exportExcel()" in html
+    assert 'fetch("/export/results.xlsx"' in html
+    assert 'exportFilename("xlsx")' in html
+
+
 def test_config_exposes_safe_observability_status():
     with TestClient(api_module.app) as client:
         response = client.get("/config")

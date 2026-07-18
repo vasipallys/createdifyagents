@@ -14,18 +14,21 @@ from __future__ import annotations
 
 import json
 import logging
+import io
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .config import get_settings
 from .engine import StreamEvent, estimate, stream, stream_batch
+from .exports import ResultsExportRequest, build_results_workbook
 from .schema import StoryInput, StoryPointResult
 from .sources import jira as jira_source
 from .sources import spreadsheet as sheet_source
@@ -213,6 +216,19 @@ async def estimate_batch(req: BatchEstimateRequest) -> EventSourceResponse:
             yield _sse(StreamEvent("error", {"message": str(exc)}))
 
     return EventSourceResponse(gen())
+
+
+@app.post("/export/results.xlsx")
+async def export_results_excel(req: ResultsExportRequest) -> StreamingResponse:
+    """Return final gated results as a genuine multi-sheet XLSX workbook."""
+    content = build_results_workbook(req.items)
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    headers = {"Content-Disposition": f'attachment; filename="story-pointer-{stamp}.xlsx"'}
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
 
 
 # ---------------------------------------------------------------------------

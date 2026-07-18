@@ -1,0 +1,42 @@
+Title,User Story,Acceptance Criteria,Technical Breakdown,Existing Points
+DB-001: Biometric Login,"As a retail banking customer, I want to log in to the mobile app using Face ID or fingerprint, so that I can access my accounts quickly without typing passwords.","Given I am on the mobile app login screen
+When I tap ""Use Face ID"" (iOS) or ""Use fingerprint"" (Android)
+And my biometric is successfully verified
+Then I am authenticated and redirected to my account dashboard
+
+Given I have enabled biometric login
+When I open the app after 5 minutes of inactivity
+Then I am prompted for biometric re-authentication
+
+Given biometric authentication fails 3 consecutive times
+When the 3rd attempt fails
+Then I am redirected to username/password login
+And a security alert is logged
+
+Given I am on a device without biometric hardware
+When I view the login screen
+Then the biometric option is not displayed","Mobile: Native iOS (LocalAuthentication framework) and Android (BiometricPrompt API) integration
+Backend: JWT token refresh with biometric assertion binding; session management with inactivity timeout
+Security: Hardware-backed keystore (Secure Enclave / TEE); anti-spoofing validation; audit logging
+API: /auth/biometric endpoint with device fingerprinting; fallback to OAuth2 password grant
+Infra: Rate limiting on biometric endpoints; SIEM integration for failed attempt alerts",5
+DB-002: Real-Time Balance Widget,"As a checking account holder, I want to see my real-time balance on my phone's home screen via a widget, so that I can monitor my spending without opening the app.","Given I have added the bank widget to my home screen
+When I view the widget
+Then I see my primary checking account balance
+And the timestamp of the last update
+
+Given my balance changes due to a transaction
+When the core banking system publishes the update
+Then the widget refreshes within 30 seconds
+
+Given I tap the widget
+When the tap is registered
+Then the mobile app opens to the account details screen
+
+Given I have multiple checking accounts
+When I configure the widget
+Then I can select which account to display","Mobile: iOS WidgetKit and Android AppWidgetProvider implementation; background refresh scheduling
+Backend: Push notification service (APNs/FCM) for balance update triggers; REST API for widget data fetch
+Security: Widget data encrypted at rest; no sensitive data in widget previews when locked
+Data: Account selection persistence in UserDefaults/SharedPreferences; caching strategy with TTL
+Integration: Core banking event stream (Kafka) → notification service → device push",3
